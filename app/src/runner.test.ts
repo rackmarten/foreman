@@ -740,14 +740,14 @@ function plan(overrides: Record<string, unknown>) {
   };
 }
 
-async function dispatchWithSeats(plans: Record<number, unknown>) {
+async function dispatchWithSeats(plans: Record<number, unknown>, executorFor = (_licenseId: number) => "cli") {
   const polled: string[] = [];
   const started: { taskId: number; licenseId: number | undefined }[] = [];
   const original = globalThis.fetch;
   const minFree = process.env.FOREMAN_MIN_FREE_GB;
   process.env.FOREMAN_MIN_FREE_GB = "0";
   const agent = (id: number, licenseId: number) => ({
-    id, name: `runner-${licenseId}`, role: null, provider: "anthropic", model: null, executor: "cli",
+    id, name: `runner-${licenseId}`, role: null, provider: "anthropic", model: null, executor: executorFor(licenseId),
     autonomyLevel: 5, credentialRef: null, routingWeight: 1, enabled: true, licenseId,
   });
   const license = (id: number) => ({
@@ -814,6 +814,42 @@ test("dispatchOnce sleeps until the window resets only when every seat is waitin
   const { result, started } = await dispatchWithSeats({ [LIMITED_SEAT]: limitedPlan, [IDLE_SEAT]: limitedPlan });
   assert.deepEqual(started, []);
   assert.equal(result.waitUntil, WINDOW_RESET);
+});
+
+async function captureLogs<T>(fn: () => Promise<T>): Promise<{ value: T; logs: string[] }> {
+  const logs: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => void logs.push(args.map(String).join(" "));
+  try {
+    return { value: await fn(), logs };
+  } finally {
+    console.log = original;
+  }
+}
+
+test("dispatchOnce logs a task no seat has an eligible agent for, once per task", { skip: noTaskRoot }, async () => {
+  const plans = { [LIMITED_SEAT]: plan({ tasks: [queued(26802)] }), [IDLE_SEAT]: plan({ tasks: [queued(26802)] }) };
+  const first = await captureLogs(() => dispatchWithSeats(plans, () => "cli-host"));
+  assert.deepEqual(first.value.started, []);
+  const lines = first.logs.filter((l) => l.includes("no eligible agent"));
+  assert.deepEqual(lines, [
+    'dispatch: task 26802 has no eligible agent (needs an enabled executor "cli" agent with autonomy >= 3 on a seat, or a routing rule)',
+  ]);
+  const second = await captureLogs(() => dispatchWithSeats(plans, () => "cli-host"));
+  assert.equal(second.logs.filter((l) => l.includes("no eligible agent")).length, 0);
+});
+
+test("dispatchOnce does not log a task that is simply another seat's work", { skip: noTaskRoot }, async () => {
+  // both seats are offered the task, but only the idle seat has a "cli"
+  // runner, so the first seat skips it quietly and the idle seat starts it.
+  const { value, logs } = await captureLogs(() =>
+    dispatchWithSeats(
+      { [LIMITED_SEAT]: plan({ tasks: [queued(26803)] }), [IDLE_SEAT]: plan({ tasks: [queued(26803)] }) },
+      (licenseId) => (licenseId === IDLE_SEAT ? "cli" : "cli-host"),
+    ),
+  );
+  assert.deepEqual(value.started, [{ taskId: 26803, licenseId: IDLE_SEAT }]);
+  assert.equal(logs.filter((l) => l.includes("no eligible agent")).length, 0);
 });
 
 // a no-commit session on an ops task is a success, on a code task a failure.

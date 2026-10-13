@@ -7,6 +7,14 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 
 ## [Unreleased]
 
+### Fixed
+- Dispatch skipped a queued task silently when no enabled seat had an
+  eligible agent for it (for example, the only agent's executor was not
+  `cli`), leaving it in `queued` forever. It now logs
+  `dispatch: task <id> has no eligible agent (...)` once per task per process,
+  naming what the task needs. Tasks owned by another seat are still skipped
+  quietly.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
