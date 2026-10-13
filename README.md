@@ -75,6 +75,8 @@ optional. The variables, by who reads them:
 | `HOMELAB_USER` | No (default `marek`) | SSH user for deploys and releases |
 | `CLAUDE_MODEL`, `EIGHT_BALL_URL`, `EIGHT_BALL_API_KEY`, `EIGHT_BALL_PROJECT`, `FOREMAN_MIN_FREE_GB` | No | Model choice, LLM gateway executor (and the pinboard project its outage alert is filed under), disk-space guard |
 | `FOREMAN_HOST_SSH`, `HOUSEKEEPING_SCHEDULE`, `CLAUDE_RULES_SCHEDULE` | No | `deploy.sh` when foreman deploys itself, cron schedules |
+| `NTFY_URL`, `NTFY_TOKEN_PINBOARD` | No (without both, the pinboard watchdog only logs) | Pinboard watchdog alerts; `PINBOARD_WATCHDOG_NTFY_TOKEN_VAR` names a different token variable |
+| `PINBOARD_WATCHDOG`, `PINBOARD_WATCHDOG_INTERVAL_SECONDS`, `PINBOARD_WATCHDOG_OUTAGE_MINUTES`, `PINBOARD_WATCHDOG_MAX_RUNS_PER_DAY`, `PINBOARD_WATCHDOG_NTFY_TOPIC`, `PINBOARD_WATCHDOG_STATE_FILE` | No (`off` disables it; defaults 30, 10, 2, `pinboard`, `~/.foreman/pinboard-watchdog.json`) | Pinboard watchdog ("Pinboard watchdog" below) |
 
 Bootstrap-only (environment of `scripts/bootstrap-container-state.sh`, not
 `.env`): `SSH_KEY`, `GIT_USER_NAME`, `GIT_USER_EMAIL`, `SEED_HOME`,
@@ -1034,6 +1036,27 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   logged (`health: could not report ...`) and retried on the next
   observation. To test: run an 8ball-executor task with a bad
   `EIGHT_BALL_URL`, and the bell shows `foreman: 8ball is failing`.
+
+  **Pinboard watchdog** (`app/src/pinboard-watchdog.ts`): the alerts above go
+  through pinboard, so they say nothing when pinboard itself is down. The
+  dispatch process runs a second, independent loop that probes
+  `${PINBOARD_URL}/health` and `${PINBOARD_URL}/api/plan` every
+  `PINBOARD_WATCHDOG_INTERVAL_SECONDS` (30); either not answering 2xx counts
+  as failing. After `PINBOARD_WATCHDOG_OUTAGE_MINUTES` (10) of failures with
+  no good probe in between it declares an outage: one ntfy push
+  (`POST $NTFY_URL/<topic>`, bearer token, topic `pinboard` by default) and,
+  if the bounds allow, one call of the repair hook. Bounds: one run per
+  outage, at most `PINBOARD_WATCHDOG_MAX_RUNS_PER_DAY` (2) in a rolling 24h.
+  The hook does nothing yet; the log shows `pinboard-watchdog: repair would
+  start`. When pinboard answers again it pushes `pinboard is back after N
+  min` and appends a record to the state file's `pending` list (start, end,
+  minutes, whether a run started, last error), for a later step to turn into
+  a pinboard task. State (failure start, outage flags, run timestamps,
+  pending records) is in `~/.foreman/pinboard-watchdog.json`, so a restart
+  keeps an outage in progress and the daily run count. A gap of more than 5
+  intervals between probes (foreman itself was down) restarts the failure
+  timer. Without `NTFY_URL` and the token, each push is only logged. While
+  healthy it logs one line an hour (`N healthy probe(s) in the last hour`).
 
   The dispatcher needs no separate mechanism for any of this: the reported
   reset reaches it as the `waitUntil` that `GET /plan/next` already returns
