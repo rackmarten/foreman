@@ -22,8 +22,12 @@ README); this repo's README covers its internals.
 - Run the tests before considering a change complete:
   `cd app && npm run typecheck && npm test`, and `node --test scripts/*.test.mjs`.
 - Commit subjects start with `Add:`, `Edit:`, `Fix:`, `Update:`, `Remove:`,
-  `Docs:` or `DevOps:` (see CONTRIBUTING.md). Record what shipped in
-  CHANGELOG.md under a dated heading.
+  `Docs:` or `DevOps:` (see CONTRIBUTING.md). Record every user-visible
+  change under `## [Unreleased]` in CHANGELOG.md (Keep a Changelog, semver).
+- Releases are cut by the maintainer on request, never as part of an ordinary
+  change: bump `version` in `app/package.json`, move `[Unreleased]` to
+  `## [x.y.z] - <date>` and update the compare links, merge, then tag `vx.y.z`
+  on that commit. The tag builds and publishes the container image.
 - This repository is public: no private host names, addresses, internal
   ticket numbers or personal details in code, comments, docs or commit
   messages. CI runs a leak check (`.github/scripts/leak-check.sh`).

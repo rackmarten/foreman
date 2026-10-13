@@ -43,3 +43,9 @@ Keep commits focused, and start the subject with one of these prefixes:
 
 By contributing, you agree that your contributions are licensed under the
 [MIT License](LICENSE).
+
+## Changelog and releases
+
+Add a line for your change under `## [Unreleased]` in CHANGELOG.md, in the
+matching Added/Changed/Fixed/Removed group. Versions follow semver and are
+released by the maintainer: a `v*` tag publishes the container image.
