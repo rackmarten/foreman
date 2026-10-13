@@ -7,6 +7,11 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 
 ## [Unreleased]
 
+### Added
+- README documents foreman's own SSH key (`state/home/.ssh/foreman_ed25519`)
+  and its fingerprint, installed next to the operator's key on every service
+  container so its access can be revoked separately.
+
 ### Fixed
 - Dispatch skipped a queued task silently when no enabled seat had an
   eligible agent for it (for example, the only agent's executor was not
