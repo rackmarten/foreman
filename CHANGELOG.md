@@ -11,6 +11,11 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 - README documents foreman's own SSH key (`state/home/.ssh/foreman_ed25519`)
   and its fingerprint, installed next to the operator's key on every service
   container so its access can be revoked separately.
+- Pinboard watchdog in the dispatch process: probes pinboard's `/health` and
+  `/api/plan` every 30s, pushes an ntfy alert after 10 minutes of continuous
+  failure and again on recovery, and tracks repair-run bounds (one per
+  outage, two per rolling 24h) in a state file that survives restarts. The
+  repair hook is a no-op for now and only logs `repair would start`.
 
 ### Fixed
 - Dispatch skipped a queued task silently when no enabled seat had an

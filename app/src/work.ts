@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { workspaceRoot } from "./paths.js";
 import { logIntegrations } from "./integrations.js";
+import { startPinboardWatchdog } from "./pinboard-watchdog.js";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -699,7 +700,11 @@ async function dispatch(args: string[]): Promise<void> {
 
   logIntegrations("dispatch");
   console.log(`dispatch: polling every ${intervalSeconds}s for runnable queued tasks`);
+  // Its own loop in the same process, so a slow dispatch poll never delays a
+  // probe (pinboard-watchdog.ts).
+  const watchdog = startPinboardWatchdog(controller.signal);
   await runDispatchLoop(intervalSeconds, opts, controller.signal);
+  await watchdog;
   console.log("dispatch: stopped");
 }
 
