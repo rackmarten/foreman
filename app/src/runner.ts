@@ -2449,7 +2449,7 @@ export async function dispatchOnce(
         if (inFlightTasks.has(candidate.taskId)) continue;
         // Routed to another seat's agent (or to no eligible agent at all): not
         // this seat's work. The seat that owns it offers it on its own pass.
-        if (!(await ownsCandidate(candidate.taskId, licenseId, rules, agents, opts))) continue;
+        if (!(await ownsCandidate(candidate.taskId, licenseId, seats, rules, agents, opts))) continue;
 
         const run = start(candidate.taskId, { ...opts, preferLicenseId: licenseId })
           .catch((err) => {
@@ -2496,9 +2496,16 @@ function seatName(licenses: readonly License[], licenseId: number | undefined): 
 // An undefined seat is the pre-#150 pinboard fallback - a single unscoped
 // pass, where there is no other seat to leave anything for, so everything the
 // plan offered is this pass's to start.
+//
+// A task no enabled seat resolves an agent for would otherwise be skipped by
+// every seat without a word and sit in `queued` forever, so it is logged, once
+// per task per process.
+const loggedNoEligibleAgent = new Set<number>();
+
 async function ownsCandidate(
   taskId: number,
   licenseId: number | undefined,
+  seats: readonly (number | undefined)[],
   rules: RoutingRule[],
   agents: Agent[],
   opts: RunOptions,
@@ -2511,7 +2518,20 @@ async function ownsCandidate(
     console.error(`dispatch: could not read task ${taskId} to route it: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
-  return resolveAgentForTask(task, rules, agents, opts.agentName, licenseId)?.licenseId === licenseId;
+  const owner = resolveAgentForTask(task, rules, agents, opts.agentName, licenseId)?.licenseId;
+  if (owner === licenseId) return true;
+  if (owner == null && !loggedNoEligibleAgent.has(taskId)) {
+    const ownedElsewhere = seats.some(
+      (seat) => seat !== undefined && seat !== licenseId && resolveAgentForTask(task, rules, agents, opts.agentName, seat) !== null,
+    );
+    if (!ownedElsewhere) {
+      loggedNoEligibleAgent.add(taskId);
+      console.log(
+        `dispatch: task ${taskId} has no eligible agent (needs an enabled executor "cli" agent with autonomy >= ${task.autonomyLevel ?? 0} on a seat, or a routing rule)`,
+      );
+    }
+  }
+  return false;
 }
 
 // nothing in foreman is triggered when a human approves/rejects a

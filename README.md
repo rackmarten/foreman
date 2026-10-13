@@ -452,7 +452,10 @@ Around that, the LXC is still the operator's bare-metal base of operations:
     seat's LLM gateway executor (free local inference, deliberately reachable
     only through an explicit rule) and its `cli-host` chat persona are never
     picked up as one. A seat with no eligible `cli` agent starts nothing
-    rather than borrowing another seat's.
+    rather than borrowing another seat's. A task that resolves to no agent
+    on *any* enabled seat is logged once per process
+    (`dispatch: task <id> has no eligible agent ...`), so it doesn't sit
+    in `queued` without a trace.
 
   Because routing is what decides which seat pays, `dispatchOnce` resolves
   it *before* starting anything (one `GET /tasks/:id` per startable
