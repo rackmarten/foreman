@@ -1,0 +1,50 @@
+# I7 (PLAN.md): keeps `work dispatch` running continuously as marek's own
+# systemd --user service, so a queued task gets picked up without a human
+# running `work task run <id>` by hand. Installed by
+# scripts/install-dispatch-service.sh, restarted on every deploy by
+# scripts/deploy.sh.
+#
+# Requires lingering enabled for marek (`sudo loginctl enable-linger marek`,
+# a one-time root step - see the install script and README's "Dispatcher"
+# section) - without it, systemd tears down marek's whole --user instance
+# (this service included) shortly after the last login session (including
+# the SSH session a deploy runs over) ends.
+[Unit]
+Description=foreman work dispatcher (pinboard I7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local-node/bin/work dispatch
+Environment=PATH=%h/.local-node/bin:/usr/bin:/bin
+# where per-task agent workdirs are created. Stated explicitly
+# rather than left to workdir.ts's own default, so the location is visible
+# from the unit file when debugging a run.
+Environment=WORK_TASK_ROOT=/app/tasks
+# I12b: EIGHT_BALL_URL/EIGHT_BALL_API_KEY for the LLM gateway executor - this is
+# a systemd --user service, so it does NOT inherit marek's login shell env
+# (.zshenv etc). /app/.env is the deployed checkout's own .env (this repo's
+# "Working directory: /app", same file scripts/deploy.sh's `npm ci` etc.
+# already run against) - NOT the separate ~/projects/<org>/foreman
+# interactive workspace clone, which is a different checkout entirely.
+# Optional ("-" prefix) so the unit still starts fine before this file
+# exists; without it, any task routed to an "8ball"-executor agent just
+# fails with a clear "not configured" error, same failure shape as any
+# other misconfigured agent.
+EnvironmentFile=-/app/.env
+# values shared with other services (EIGHT_BALL_URL/EIGHT_BALL_API_KEY)
+# now come from ../keyring, which renders them per host into this file. Listed
+# after /app/.env so a shared value wins over a stale local copy, and optional
+# ("-" prefix) so the unit still starts on a host that has never been synced.
+EnvironmentFile=-/app/secrets/global.env
+Restart=on-failure
+RestartSec=10
+# A running task can take up to work.js's own --timeout-ms (30 min default)
+# to finish - the dispatcher only stops between cycles (see runner.ts's
+# runDispatchLoop), never mid-task, so give a stop request enough time to
+# actually wait for that instead of being escalated to SIGKILL.
+TimeoutStopSec=2100
+
+[Install]
+WantedBy=default.target

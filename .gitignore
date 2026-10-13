@@ -1,0 +1,60 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local configuration
+docker-compose.override.yml
+*.local
+*.local.*
+
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+tmp/
+temp/
+.cache/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# This repo's own runner creates an agent's git worktree at
+# .claude/worktrees/<name> inside whichever repo it is working on, including
+# this one - never commit a gitlink to a throwaway worktree. Kept for the
+# worktrees a past task left behind; nothing creates new ones.
+.claude/worktrees/
+
+# per-task agent workdirs (clones of whichever repos a task may
+# write to, plus the deploy locks) live under /app/tasks on this LXC - i.e.
+# inside this repo's own deployed checkout. Runtime state, never committed.
+/tasks/
+
+# the compose services' bind mounts (docker-compose.yml). Runtime
+# state and credentials on the host, never committed.
+/workspace/
+/state/
+/secrets/

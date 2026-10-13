@@ -1,0 +1,52 @@
+# the I8 planning-chat poller as its own systemd --user service,
+# split out of foreman-dispatch.service.
+#
+# It used to share the dispatch loop, which caused two distinct problems seen
+# live in pinboard chat thread #26:
+#
+#   1. A chat turn parked on an unanswered permission request sat in front of
+#      the next dispatch cycle, so task dispatch stopped entirely for as long
+#      as the operator took to answer (up to 30 minutes).
+#   2. Every deploy restarts foreman-dispatch, and systemd's SIGTERM reaches
+#      the whole control group - including the `claude` child of whatever chat
+#      turn was mid-flight. The turn was lost and a parse error was posted into
+#      the thread as the agent's reply.
+#
+# Separating them means a dispatcher deploy no longer touches a live
+# conversation, and vice versa. Same lingering requirement as
+# foreman-dispatch.service (`sudo loginctl enable-linger marek`, one-time root
+# step) - without it, systemd tears down marek's whole --user instance shortly
+# after the last login session ends.
+[Unit]
+Description=foreman planning-chat poller (pinboard I8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local-node/bin/work chat daemon
+Environment=PATH=%h/.local-node/bin:/usr/bin:/bin
+# where per-task agent workdirs are created. Stated explicitly
+# rather than left to workdir.ts's own default, so the location is visible
+# from the unit file when debugging a run.
+Environment=WORK_TASK_ROOT=/app/tasks
+# Same deployed-checkout .env as foreman-dispatch.service - a systemd --user
+# service does not inherit marek's login shell env. Optional ("-" prefix) so
+# the unit still starts before the file exists.
+EnvironmentFile=-/app/.env
+# values shared with other services (EIGHT_BALL_URL/EIGHT_BALL_API_KEY)
+# now come from ../keyring, which renders them per host into this file. Listed
+# after /app/.env so a shared value wins over a stale local copy, and optional
+# ("-" prefix) so the unit still starts on a host that has never been synced.
+EnvironmentFile=-/app/secrets/global.env
+Restart=on-failure
+RestartSec=10
+# A chat turn can run up to chat.ts's DEFAULT_CHAT_OPTIONS.timeoutMs (45 min,
+# which has to clear permission-server.ts's 30-minute operator-approval wait).
+# The loop only stops between polls, never mid-turn, so a stop request needs
+# room to actually wait for that rather than being escalated to SIGKILL - the
+# exact escalation this split exists to prevent.
+TimeoutStopSec=2820
+
+[Install]
+WantedBy=default.target

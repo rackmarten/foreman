@@ -1,0 +1,95 @@
+# foreman's runner as compose services, replacing the
+# systemd --user units in systemd/. One locally built image, one command per
+# service. No published ports: foreman is outbound-only (pinboard, GitHub,
+# SSH to the LXCs), and even the permission server is stdio MCP.
+#
+# Deploy with scripts/deploy.sh, not a bare `docker compose up`: it brings
+# the services up one at a time with --no-deps, skips one that is busy, and
+# retires the systemd unit a service replaced.
+name: foreman
+
+x-runner: &runner
+  build:
+    context: .
+    args:
+      DOCKER_GID: ${DOCKER_GID:-991}
+  image: foreman-runner:local
+  restart: unless-stopped
+  # Reaps the claude/git/ssh children the loops spawn, and forwards SIGTERM.
+  init: true
+  # .env alone is enough; see .env.example for what is required.
+  # secrets/global.env is an optional layer a secret store renders, read
+  # after .env so its shared values win over a stale local copy. Both are
+  # optional to compose, so a fresh checkout still starts.
+  env_file:
+    - path: .env
+      required: false
+    - path: secrets/global.env
+      required: false
+  # Container layout, not configuration: these must match the mounts below.
+  # HOME is explicit rather than the image's /home/marek, so
+  # .claude, .ssh and .gitconfig persist in ./state across rebuilds;
+  # scripts/bootstrap-container-state.sh seeds it. CLAUDE_BIN pins the
+  # image's own claude, whatever a host-side .env says.
+  # FOREMAN_SERVICE (set per service below) is how scripts/deploy.sh knows
+  # it is inside a runner container.
+  environment: &runner-env
+    HOME: /app/state/home
+    WORK_TASK_ROOT: ${WORK_TASK_ROOT:-/app/tasks}
+    WORK_WORKSPACE_ROOT: /app/workspace
+    CLAUDE_BIN: claude
+    # GitHub orgs whose repos are public (README, "Public repositories").
+    PUBLIC_GITHUB_ORGS: ${PUBLIC_GITHUB_ORGS-rackmarten}
+  volumes:
+    # Agent runs use the host's daemon (decision 1 in #514).
+    - /var/run/docker.sock:/var/run/docker.sock
+    # Identical path inside and out, so a bind mount an agent's own
+    # `docker compose run` asks the host daemon for resolves to the same files.
+    - ${WORK_TASK_ROOT:-/app/tasks}:${WORK_TASK_ROOT:-/app/tasks}
+    # The one workspace clone (decision 2): holds <org>/<repo>, which is what
+    # a pinboard project's localPath is relative to. FOREMAN_WORKSPACE_DIR
+    # moves it on the host.
+    - ${FOREMAN_WORKSPACE_DIR:-./workspace}:/app/workspace
+    # Durable state: HOME is ./state/home. Back this up.
+    - ./state:/app/state
+    - ./secrets:/app/secrets:ro
+
+services:
+  # Picks up queued tasks and runs them. A run can take up to 30 min and the
+  # loop only stops between cycles (foreman-dispatch.service TimeoutStopSec).
+  dispatch:
+    <<: *runner
+    command: ["work", "dispatch"]
+    environment:
+      <<: *runner-env
+      FOREMAN_SERVICE: dispatch
+    stop_grace_period: 2100s
+
+  # Planning-chat poller. A turn can run 45 min (foreman-chat.service).
+  chat:
+    <<: *runner
+    command: ["work", "chat", "daemon"]
+    environment:
+      <<: *runner-env
+      FOREMAN_SERVICE: chat
+    stop_grace_period: 2820s
+
+  # Post-PR pipeline: CI wait, merge, deploy, verify (foreman-pipeline.service).
+  pipeline:
+    <<: *runner
+    command: ["work", "pipeline", "watch"]
+    environment:
+      <<: *runner-env
+      FOREMAN_SERVICE: pipeline
+    stop_grace_period: 300s
+
+  # Nightly docker/npm prune. Behind a profile so `up` never starts it; the
+  # host crontab entry from scripts/install-housekeeping-cron.sh runs it.
+  housekeeping:
+    <<: *runner
+    profiles: ["housekeeping"]
+    restart: "no"
+    command: ["/app/scripts/housekeeping.sh", "--apply"]
+    environment:
+      <<: *runner-env
+      FOREMAN_SERVICE: housekeeping

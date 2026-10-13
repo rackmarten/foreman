@@ -1,0 +1,10 @@
+# Only app/ and scripts/ go into the image. On foreman the build context is
+# /app, which also holds the task workdirs, the workspace clone, state and
+# secrets, so default to nothing and allow what the Dockerfile copies.
+*
+!app/package.json
+!app/package-lock.json
+!app/tsconfig.json
+!app/src/
+app/src/*.test.ts
+!scripts/

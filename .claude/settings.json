@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat *.env.example)",
+      "Bash(cat .env.example)",
+      "Edit(**/.env.example)",
+      "Read(**/.env.example)"
+    ],
+    "deny": [
+      "Bash(cat *.env)",
+      "Bash(cat .env)",
+      "Bash(rg *.env)",
+      "Bash(rg .env)",
+      "Bash(shellcheck *.env)",
+      "Bash(shellcheck .env)",
+      "Edit(**/.env)",
+      "Read(**/.env)"
+    ]
+  }
+}

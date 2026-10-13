@@ -1,0 +1,59 @@
+# A past task: the post-PR pipeline poller as its own
+# systemd --user service, alongside foreman-dispatch and foreman-chat.
+#
+# It drives a task through awaiting_ci -> awaiting_merge -> deploying ->
+# verifying (see app/src/pipeline.ts) using pinboard's own statuses as the
+# only state. Work that used to run inside the agent's own session, holding
+# its lease, its Claude session and the single concurrency slot for the
+# ten-plus minutes CI plus a deploy takes.
+#
+# A third process rather than more work inside foreman-dispatch, for the same
+# reasons a past task split the chat poller out:
+#
+#   1. A stage that takes minutes (a CI wait, a deploy) would sit in front of
+#      the next dispatch cycle, so no queued task could start meanwhile.
+#   2. Every deploy restarts foreman-dispatch, and systemd's SIGTERM reaches
+#      the whole control group - which would kill a `gh pr merge` or a
+#      deploy-service.sh run mid-flight. Deploying foreman now leaves a live
+#      pipeline stage alone, and vice versa.
+#
+# Same lingering requirement as the other two units (`sudo loginctl
+# enable-linger marek`, one-time root step) - without it, systemd tears down
+# marek's whole --user instance shortly after the last login session ends.
+[Unit]
+Description=foreman post-PR pipeline poller (pinboard #154)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local-node/bin/work pipeline watch
+Environment=PATH=%h/.local-node/bin:/usr/bin:/bin
+# where per-task agent workdirs (and the per-repo deploy locks the
+# deploying stage takes) live. Stated explicitly rather than left to
+# workdir.ts's own default, so the location is visible from the unit file when
+# debugging - and it MUST match foreman-dispatch.service's value, or the two
+# processes would take different lock files and could deploy the same repo at
+# the same time.
+Environment=WORK_TASK_ROOT=/app/tasks
+# The deployed checkout's own .env, same file as the other two units. A
+# systemd --user service does not inherit marek's login shell env, and the
+# verifying stage needs HOMELAB_USER to SSH to a service's LXC (it falls back
+# to "marek", which is correct today, so this is belt and braces). Optional
+# ("-" prefix) so the unit still starts before the file exists.
+EnvironmentFile=-/app/.env
+# values shared with other services (EIGHT_BALL_URL/EIGHT_BALL_API_KEY)
+# now come from ../keyring, which renders them per host into this file. Listed
+# after /app/.env so a shared value wins over a stale local copy, and optional
+# ("-" prefix) so the unit still starts on a host that has never been synced.
+EnvironmentFile=-/app/secrets/global.env
+Restart=on-failure
+RestartSec=10
+# The loop only stops between polls, never mid-merge or mid-deploy. A deploy
+# plus its healthcheck is bounded by deploy-service.sh's own timeouts, so a
+# couple of minutes of room is enough - far less than the dispatcher needs,
+# since nothing here waits on a Claude session.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target
