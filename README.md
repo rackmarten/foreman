@@ -211,6 +211,20 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   LXC provisioned from scratch should get both the desktop's and
   foreman's key from day one, not have foreman's appended by hand
   afterward like this first round was.
+
+  **foreman's own key.** The containerized install also has an identity of
+  its own, separate from the operator's key it was moved with:
+  `state/home/.ssh/foreman_ed25519` (ed25519, comment
+  `foreman-agent@foreman (foreman own key, not a person)`, fingerprint
+  `SHA256:pTdk9UrZRis7nxfTTnhDWVPscIZ3EDX7Qut9vIUm2eE`). Its public half was
+  appended, alongside the existing keys, to the deploy user's
+  `authorized_keys` on every service container and checked per host with
+  `ssh -i state/home/.ssh/foreman_ed25519 -o IdentitiesOnly=yes`. It is not
+  in root's `authorized_keys` on the Proxmox host, and foreman's SSH client
+  still offers `id_ed25519` (the operator's key) by default; switching to
+  the own key and retiring the operator's are a later, hand-run step. A new
+  container's `SSH_PUBLIC_KEY` should list this key next to the operator's.
+  Check a host has it with `ssh <host> ssh-keygen -lf ~/.ssh/authorized_keys`.
 - **The `work` CLI** (`app/`) - a client for pinboard's API. Read-only:
   `work task list [--project=] [--status=] [--type=] [--executor=]`,
   `work task show <id>`, `work task next`. `task list` also takes
