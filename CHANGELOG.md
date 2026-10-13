@@ -1,12 +1,13 @@
 # Changelog
 
-Notable changes to `foreman`. Format loosely follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (Added/Changed/
-Fixed/Removed), grouped by date rather than version: `main` deploys on every
-push with `scripts/deploy.sh`, so there is no release boundary to version
-against.
+All notable changes to `foreman` are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Each `v*` tag
+publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 
-## 2026-10-13
+## [Unreleased]
+
+## [0.1.0] - 2026-10-13
 
 ### Added
 - First public release. foreman is the agent runner behind pinboard: a
@@ -20,3 +21,6 @@ against.
   public orgs and an optional LLM gateway executor for non-code tasks round it
   out. `.env` with a Claude credential and a GitHub token is enough to start;
   every other integration logs whether it is on.
+
+[Unreleased]: https://github.com/rackmarten/foreman/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/rackmarten/foreman/releases/tag/v0.1.0
