@@ -1,5 +1,7 @@
 # foreman
 
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rackmarten)
+
 The agent runner of the pinboard/foreman pair. It polls
 [pinboard](https://github.com/rackmarten/pinboard) for queued tasks, runs
 each one as a Claude Code session in its own clone of the repository, opens
@@ -1471,3 +1473,10 @@ unchanged.
 and reference it as `${VAR}`.
 
 Do not run a recursive `chown` on `/app`.
+
+## Support this project
+
+If foreman saves you time, you can support its development on
+[Ko-fi](https://ko-fi.com/rackmarten):
+
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rackmarten)
