@@ -16,6 +16,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   failure and again on recovery, and tracks repair-run bounds (one per
   outage, two per rolling 24h) in a state file that survives restarts. The
   repair hook is a no-op for now and only logs `repair would start`.
+- The pipeline retries a post-merge deploy that failed on Docker Hub's pull
+  rate limit instead of handing the task back to an agent: it stays in
+  `deploying` and is retried after 30, 60 and 120 minutes, with a comment per
+  retry saying when the next attempt is. The retry state is read back from
+  those comments, so it survives a restart. A fourth rate-limited failure
+  falls back to the usual `deploy_failed` handback.
 
 ### Fixed
 - Dispatch skipped a queued task silently when no enabled seat had an

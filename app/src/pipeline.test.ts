@@ -36,6 +36,13 @@ import {
   decideAfterMerge,
   fetchRedMain,
   previousFailedRunId,
+  isDockerHubRateLimited,
+  rateLimitMarker,
+  rateLimitState,
+  decideRateLimitRetry,
+  runDeploySequence,
+  DEPLOY_RATE_LIMIT_BACKOFF_MS,
+  type DeploySequenceDeps,
   type CiFailure,
   type Exec,
 } from "./pipeline.js";
@@ -721,4 +728,85 @@ test("squashMergeArgs: a public repo's subject drops the pinboard suffix, a priv
   assert.deepEqual(pub, ["pr", "merge", url, "--squash", "--delete-branch", "--subject", "Fix the board (#41)"]);
   assert.doesNotMatch(pub.join(" "), /pinboard #|task [#0-9]|#594/);
   assert.deepEqual(squashMergeArgs(url, null), ["pr", "merge", url, "--squash", "--delete-branch"]);
+});
+
+// Docker Hub rate limit: retried in `deploying` instead of handed back.
+
+test("isDockerHubRateLimited matches Docker Hub's rate-limit answers", () => {
+  const samples = [
+    "Error response from daemon: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit",
+    " postgres Error toomanyrequests: You have reached your pull rate limit. You may increase the limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit",
+    "failed to solve: node:22-alpine: failed to resolve source metadata for docker.io/library/node:22-alpine: unexpected status from HEAD request to https://registry-1.docker.io/v2/library/node/manifests/22-alpine: 429 Too Many Requests",
+  ];
+  for (const sample of samples) assert.equal(isDockerHubRateLimited(sample), true, sample);
+});
+
+test("isDockerHubRateLimited ignores other deploy failures", () => {
+  const samples = [
+    "Error response from daemon: manifest for postgres:99 not found: manifest unknown",
+    "ssh: connect to host app-host port 22: Connection timed out",
+    "healthcheck failed after 60s",
+    "npm ERR! 404 Not Found - GET https://registry.npmjs.org/nope",
+    "",
+  ];
+  for (const sample of samples) assert.equal(isDockerHubRateLimited(sample), false, sample);
+});
+
+test("decideRateLimitRetry walks the backoff schedule, then gives up", () => {
+  const now = Date.parse("2026-01-01T00:00:00Z");
+  assert.deepEqual(decideRateLimitRetry(0, now), { retry: 1, nextAt: now + 30 * 60_000 });
+  assert.deepEqual(decideRateLimitRetry(1, now), { retry: 2, nextAt: now + 60 * 60_000 });
+  assert.deepEqual(decideRateLimitRetry(DEPLOY_RATE_LIMIT_BACKOFF_MS.length - 1, now)?.retry, DEPLOY_RATE_LIMIT_BACKOFF_MS.length);
+  assert.equal(decideRateLimitRetry(DEPLOY_RATE_LIMIT_BACKOFF_MS.length, now), null);
+});
+
+test("rateLimitState reads the latest retry marker posted since the stage began", () => {
+  const entered = "2026-01-01T10:00:00.000Z";
+  const at = (iso: string, body: string, authorName = "foreman-pipeline") => ({ authorName, body, createdAt: iso });
+  const first = Date.parse("2026-01-01T10:30:00.000Z");
+  const second = Date.parse("2026-01-01T11:31:00.000Z");
+  const comments = [
+    at("2026-01-01T09:00:00.000Z", `old stage\n\n${rateLimitMarker(3, Date.parse("2026-01-01T09:30:00.000Z"))}`),
+    at("2026-01-01T10:00:05.000Z", `x\n\n${rateLimitMarker(1, first)}\n\nlog`),
+    at("2026-01-01T10:31:00.000Z", rateLimitMarker(2, second)),
+    at("2026-01-01T10:40:00.000Z", rateLimitMarker(3, second + 1), "someone-else"),
+  ];
+  assert.deepEqual(rateLimitState(comments, entered), { retries: 2, nextAt: second });
+  assert.deepEqual(rateLimitState([], entered), { retries: 0, nextAt: null });
+});
+
+function failingDeploy(stderr: string): DeploySequenceDeps {
+  return {
+    deploy: async () => ({ ran: true, value: { ok: false, stdout: "", stderr } }),
+    isSecretStore: () => false,
+    keyringHosts: () => [],
+    syncHosts: () => ({ ok: true, detail: "" }),
+  };
+}
+
+test("a rate-limited deploy stays in deploying with a retry comment, until the schedule runs out", async () => {
+  const repo = [{ repoSlug: "app", prUrl: "https://github.com/x/app/pull/1", prId: 1 }];
+  const deps = failingDeploy("toomanyrequests: You have reached your unauthenticated pull rate limit.");
+  const now = Date.parse("2026-01-01T10:00:00.000Z");
+
+  const waiting = await runDeploySequence(repo, 0, deps, { retries: 0, now });
+  assert.equal(waiting.moved, null);
+  assert.equal(waiting.repair, undefined);
+  assert.match(waiting.comment ?? "", /rate limit/);
+  assert.deepEqual(rateLimitState([{ authorName: "foreman-pipeline", body: waiting.comment ?? "", createdAt: "2026-01-01T10:00:01.000Z" }], null), {
+    retries: 1,
+    nextAt: now + DEPLOY_RATE_LIMIT_BACKOFF_MS[0],
+  });
+
+  const exhausted = await runDeploySequence(repo, 0, deps, { retries: DEPLOY_RATE_LIMIT_BACKOFF_MS.length, now });
+  assert.equal(exhausted.moved, "queued");
+  assert.equal(exhausted.repair?.reason, "deploy_failed");
+  assert.match(exhausted.comment ?? "", /still rate-limited/);
+});
+
+test("a deploy failing for any other reason is still handed back at once", async () => {
+  const repo = [{ repoSlug: "app", prUrl: "https://github.com/x/app/pull/1", prId: 1 }];
+  const outcome = await runDeploySequence(repo, 0, failingDeploy("manifest unknown"), { retries: 0, now: 0 });
+  assert.equal(outcome.moved, "queued");
+  assert.doesNotMatch(outcome.comment ?? "", /rate-limited/);
 });

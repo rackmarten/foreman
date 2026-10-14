@@ -83,6 +83,12 @@ const MERGE_REBASE_WINDOW_MS = 5 * 60 * 1000;
 // a failed deploy. The stage's own clock is the retry budget (one attempt per
 // poll), so this survives the poller restarting.
 const VERIFY_TIMEOUT_MS = 5 * 60 * 1000;
+// A deploy that failed only because Docker Hub refused a pull (its rate limit
+// is per public IP, so every host behind one address shares it) is not
+// something an agent can fix, and the limit lifts on its own. So instead of a
+// handback it waits in `deploying` and retries after each of these delays in
+// turn: four attempts in all, then the normal deploy_failed handback.
+export const DEPLOY_RATE_LIMIT_BACKOFF_MS = [30, 60, 120].map((minutes) => minutes * 60 * 1000);
 // Bound on any command output copied onto a task. Well above the activity
 // truncation limit (this is real debugging evidence a human will read, and
 // what #161 feeds back to an agent), but still bounded so one enormous
@@ -846,6 +852,52 @@ function prIsMerged(prUrl: string): boolean {
 // pinboard's releases view (DEPLOY_ACTOR, DEPLOY_TASK_ID/DEPLOY_REQUEST_ID).
 // `release` deploys the repo's production release target instead
 // of its steps; only releases.ts's runRelease passes it.
+// Docker Hub's answers to a pull over its rate limit, as docker and compose
+// print them: `toomanyrequests: You have reached your unauthenticated pull
+// rate limit`, older daemons' `You have reached your pull rate limit`, and
+// the bare HTTP status some build steps surface instead.
+const RATE_LIMIT_PATTERN = /toomanyrequests|429 Too Many Requests|You have reached your (?:\w+ )?pull rate limit/i;
+
+export function isDockerHubRateLimited(output: string): boolean {
+  return RATE_LIMIT_PATTERN.test(output);
+}
+
+// The rate-limit retries live in the task's own comments, so a restarted
+// poller picks up where it left off: each retry's comment carries this
+// marker, and only the ones posted since the task entered `deploying` count.
+export function rateLimitMarker(retry: number, nextAt: number): string {
+  return `Docker Hub rate limit: retry ${retry} of ${DEPLOY_RATE_LIMIT_BACKOFF_MS.length}, next deploy attempt after ${new Date(nextAt).toISOString()}`;
+}
+
+export interface RateLimitState {
+  retries: number;
+  nextAt: number | null;
+}
+
+export function rateLimitState(
+  comments: readonly { authorName: string; body: string; createdAt: string }[],
+  stageEnteredAt: string | null,
+): RateLimitState {
+  const since = stageEnteredAt ? Date.parse(stageEnteredAt) : Number.NaN;
+  const pattern = /^Docker Hub rate limit: retry (\d+) of \d+, next deploy attempt after (\S+)/m;
+  let state: RateLimitState = { retries: 0, nextAt: null };
+  for (const comment of comments) {
+    if (comment.authorName !== PIPELINE_ACTOR.actorName) continue;
+    if (Number.isFinite(since) && Date.parse(comment.createdAt) < since) continue;
+    const match = pattern.exec(comment.body);
+    const nextAt = match ? Date.parse(match[2]) : Number.NaN;
+    if (match && Number.isFinite(nextAt)) state = { retries: Number(match[1]), nextAt };
+  }
+  return state;
+}
+
+// Whether a rate-limited deploy gets another try, and when. Null once the
+// backoff schedule is spent: the caller falls back to the normal handback.
+export function decideRateLimitRetry(retriesSoFar: number, now: number): { retry: number; nextAt: number } | null {
+  const delay = DEPLOY_RATE_LIMIT_BACKOFF_MS[retriesSoFar];
+  return delay === undefined ? null : { retry: retriesSoFar + 1, nextAt: now + delay };
+}
+
 export function deployService(repoSlug: string, env?: Record<string, string>, opts: { release?: boolean } = {}): CommandResult {
   const script = join(HOMELAB_ROOT, "homelab", "scripts", "deploy-service.sh");
   return run("bash", opts.release ? [script, "--release", repoSlug] : [script, repoSlug], {
@@ -1135,6 +1187,7 @@ export async function runDeploySequence(
   deployable: readonly PipelineRepo[],
   elapsed: number,
   deps: DeploySequenceDeps,
+  rateLimit: { retries: number; now: number } = { retries: 0, now: Date.now() },
 ): Promise<StageOutcome> {
   const store = deployable.filter((r) => deps.isSecretStore(r.repoSlug));
   const ordered = [...store, ...deployable.filter((r) => !store.includes(r))];
@@ -1154,6 +1207,21 @@ export async function runDeploySequence(
 
     if (!held.value.ok) {
       const output = truncateLog(held.value.stderr || held.value.stdout);
+      const limited = isDockerHubRateLimited(`${held.value.stdout}\n${held.value.stderr}`);
+      const retry = limited ? decideRateLimitRetry(rateLimit.retries, rateLimit.now) : null;
+      if (retry) {
+        return {
+          moved: null,
+          note: `${repo.repoSlug}'s deploy hit Docker Hub's rate limit, retrying after ${new Date(retry.nextAt).toISOString()}`,
+          comment: [
+            `Deploying ${repo.repoSlug} failed on Docker Hub's pull rate limit, which no agent can fix, so the task stays in \`deploying\` and the deploy is retried.`,
+            "",
+            rateLimitMarker(retry.retry, retry.nextAt),
+            "",
+            output,
+          ].join("\n"),
+        };
+      }
       return handBack(
         "deploy_failed",
         `deploy failed for ${repo.repoSlug}`,
@@ -1162,6 +1230,7 @@ export async function runDeploySequence(
           "",
           output,
           "",
+          ...(limited ? [`It was still rate-limited by Docker Hub after ${DEPLOY_RATE_LIMIT_BACKOFF_MS.length + 1} attempts.`, ""] : []),
           "The change is already on main, so the fix goes on top of it.",
         ].join("\n"),
         `deploy-service.sh ${repo.repoSlug} failed after this task's change was merged to main:\n\n${output}`,
@@ -1206,7 +1275,16 @@ async function handleDeploying(entry: PipelineTask, repos: PipelineRepo[], now: 
   }
   if (deployable.length === 0) return { moved: "verifying", note: "nothing to deploy" };
 
-  return runDeploySequence(deployable, stageElapsedMs(entry.stageEnteredAt, now), {
+  // A rate-limited deploy waits out its backoff here, and once it is due the
+  // lock-wait clock restarts from then rather than from entering the stage.
+  const comments = await getComments(entry.taskId).catch(() => []);
+  const limited = rateLimitState(comments, entry.stageEnteredAt);
+  if (limited.nextAt !== null && now < limited.nextAt) {
+    return { moved: null, note: `Docker Hub rate limit, next deploy attempt after ${new Date(limited.nextAt).toISOString()}` };
+  }
+  const elapsed = limited.nextAt !== null ? now - limited.nextAt : stageElapsedMs(entry.stageEnteredAt, now);
+
+  return runDeploySequence(deployable, elapsed, {
     // A past task's per-repo deploy lock, inherited unchanged: two
     // deploy-service.sh runs against the same LXC would fight over the same
     // containers. The lock is a file rather than an in-process mutex because
@@ -1230,7 +1308,7 @@ async function handleDeploying(entry: PipelineTask, repos: PipelineRepo[], now: 
     isSecretStore: (repoSlug) => isSecretStoreRepo(repoSlug),
     keyringHosts: (prUrl, repoSlug) => keyringHostsForPr(prUrl, repoSlug),
     syncHosts: (hosts, repoSlug) => syncKeyringHosts(hosts, repoSlug),
-  });
+  }, { retries: limited.retries, now });
 }
 
 async function handleVerifying(entry: PipelineTask, repos: PipelineRepo[], now: number): Promise<StageOutcome> {
