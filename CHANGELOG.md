@@ -22,6 +22,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   retry saying when the next attempt is. The retry state is read back from
   those comments, so it survives a restart. A fourth rate-limited failure
   falls back to the usual `deploy_failed` handback.
+- `FOREMAN_CI_TIMEOUT_MINUTES` sets how long the pipeline waits for a PR's
+  CI run.
+
+### Changed
+- The pipeline's CI wait defaults to 30 minutes (was 10), so a cold build on
+  a slow runner is no longer read as a CI failure.
 
 ### Fixed
 - Dispatch skipped a queued task silently when no enabled seat had an

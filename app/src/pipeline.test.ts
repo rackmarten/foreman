@@ -42,11 +42,28 @@ import {
   decideRateLimitRetry,
   runDeploySequence,
   DEPLOY_RATE_LIMIT_BACKOFF_MS,
+  ciTimeoutMs,
   type DeploySequenceDeps,
   type CiFailure,
   type Exec,
 } from "./pipeline.js";
 import type { PullRequest } from "./pinboard.js";
+
+test("ciTimeoutMs defaults to 30 minutes when FOREMAN_CI_TIMEOUT_MINUTES is unset or empty", () => {
+  assert.equal(ciTimeoutMs({}), 30 * 60 * 1000);
+  assert.equal(ciTimeoutMs({ FOREMAN_CI_TIMEOUT_MINUTES: "" }), 30 * 60 * 1000);
+});
+
+test("ciTimeoutMs uses a valid FOREMAN_CI_TIMEOUT_MINUTES", () => {
+  assert.equal(ciTimeoutMs({ FOREMAN_CI_TIMEOUT_MINUTES: "45" }), 45 * 60 * 1000);
+  assert.equal(ciTimeoutMs({ FOREMAN_CI_TIMEOUT_MINUTES: "2.5" }), 2.5 * 60 * 1000);
+});
+
+test("ciTimeoutMs falls back to 30 minutes for zero, negative or garbage values", () => {
+  for (const value of ["0", "-5", "abc", "Infinity", " "]) {
+    assert.equal(ciTimeoutMs({ FOREMAN_CI_TIMEOUT_MINUTES: value }), 30 * 60 * 1000, value);
+  }
+});
 
 // I13, now the poller's: evaluateCiRun drives whether the pipeline waits in
 // `awaiting_ci`, moves on, or parks - mirrors deploy-service.sh's own bash
