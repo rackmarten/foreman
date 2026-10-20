@@ -166,19 +166,55 @@ export interface CiRunInfo {
   headSha?: string;
 }
 
+// What the pipeline knows about a PR besides its CI run, for the "no run yet"
+// case. `mergeable` is GitHub's own field (MERGEABLE, CONFLICTING, UNKNOWN
+// while it is still computing), null when it could not be read.
+// `hasWorkflows` is whether the head commit has a workflow GitHub would run
+// for a push or a PR; null when that could not be read, which counts as "yes"
+// (waiting too long costs a poll, proceeding wrongly ships untested code).
+export interface PrCiContext {
+  mergeable: string | null;
+  hasWorkflows: boolean | null;
+}
+
+const NO_CI_CONTEXT: PrCiContext = { mergeable: null, hasWorkflows: false };
+
+export type CiDecision =
+  | { decision: "proceed" }
+  | { decision: "wait" }
+  | { decision: "fail"; reason: string }
+  | { decision: "conflict" }
+  | { decision: "no_run"; reason: string };
+
 // Pure (no `gh` call, no clock) so it is unit-testable - mirrors
-// deploy-service.sh's own bash loop: no run found yet -> wait, up to graceMs,
-// in case GitHub just has not registered it; no run found after
-// that grace period -> proceed, on the assumption this repo has no CI
-// configured at all; still running -> wait (unless the timeout has elapsed);
-// a completed failure -> stop; anything else completed -> proceed.
+// deploy-service.sh's own bash loop: still running -> wait (unless the
+// timeout has elapsed); a completed failure -> stop; anything else completed
+// -> proceed.
+//
+// A PR that conflicts with its base is never a pass: GitHub runs no
+// pull_request workflow for a PR it cannot merge, so "no run" there says
+// nothing about the code. With no run for the head commit yet: UNKNOWN
+// mergeability waits for GitHub to finish computing it; a repo that has
+// workflows waits up to the timeout and then reports `no_run`; only a repo
+// with no workflow files proceeds once graceMs has passed (GitHub can take a
+// few seconds to register a run, and a past task merged 4 seconds after
+// opening its PR because that gap read as "no CI").
 export function evaluateCiRun(
   run: CiRunInfo | null,
   elapsedMs: number,
   timeoutMs: number,
   graceMs = 0,
-): { decision: "proceed" } | { decision: "wait" } | { decision: "fail"; reason: string } {
-  if (!run) return elapsedMs < graceMs ? { decision: "wait" } : { decision: "proceed" };
+  context: PrCiContext = NO_CI_CONTEXT,
+): CiDecision {
+  if (context.mergeable === "CONFLICTING") return { decision: "conflict" };
+  if (!run) {
+    if (context.mergeable === "UNKNOWN" || context.hasWorkflows !== false) {
+      if (elapsedMs < timeoutMs) return { decision: "wait" };
+      const why = context.mergeable === "UNKNOWN" ? "GitHub still reports the PR's mergeability as unknown" : "the repo has workflows";
+      return { decision: "no_run", reason: `no CI run appeared after ${Math.round(timeoutMs / 60000)} minutes, and ${why}` };
+    }
+    return elapsedMs < graceMs ? { decision: "wait" } : { decision: "proceed" };
+  }
   if (run.status !== "completed") {
     if (elapsedMs >= timeoutMs) {
       return { decision: "fail", reason: `CI still ${run.status} after ${Math.round(timeoutMs / 1000)}s (${run.url})` };
@@ -189,6 +225,36 @@ export function evaluateCiRun(
     return { decision: "fail", reason: `CI failed (${run.url})` };
   }
   return { decision: "proceed" };
+}
+
+// Whether a workflow file runs on a push or a PR: the `on:` key's inline
+// value or indented block names push, pull_request or pull_request_target.
+// A plain text scan rather than a YAML parser, which foreman does not carry;
+// a false "yes" only means waiting for a run, a false "no" is what to avoid.
+export function workflowTriggersOnPushOrPr(yaml: string): boolean {
+  const lines = yaml.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^["']?on["']?\s*:(.*)$/.exec(lines[i]);
+    if (!match) continue;
+    const block = [match[1]];
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\S/.test(lines[j]) && !lines[j].startsWith("#")) break;
+      block.push(lines[j].replace(/#.*$/, ""));
+    }
+    return /\b(?:push|pull_request\w*)\b/.test(block.join("\n").replace(/#.*$/gm, ""));
+  }
+  return false;
+}
+
+export function isWorkflowFile(name: string): boolean {
+  return /\.ya?ml$/.test(name);
+}
+
+// The files git reported as conflicting, from a failed rebase or merge.
+export function conflictingFiles(gitOutput: string): string[] {
+  const files = new Set<string>();
+  for (const match of gitOutput.matchAll(/^CONFLICT \([^)]*\): (?:Merge conflict in )?(\S+)/gm)) files.add(match[1]);
+  return [...files];
 }
 
 // How long the task has been in its current stage. The stage's own timestamp
@@ -606,6 +672,46 @@ export function fetchLatestCiRun(org: string, repoSlug: string, branch: string, 
   return runs.find((ciRun) => ciRun.headSha === headSha) ?? null;
 }
 
+// GitHub's mergeable state for a PR (MERGEABLE, CONFLICTING, UNKNOWN), null
+// when gh could not read it. Null does not block: the CI run itself is still
+// the gate, and the workflow check below still applies.
+export function fetchPrMergeable(prUrl: string, exec: Exec = run): string | null {
+  const result = exec("gh", ["pr", "view", prUrl, "--json", "mergeable", "--jq", ".mergeable"]);
+  const state = result.stdout.trim();
+  return result.ok && state ? state : null;
+}
+
+// A commit's workflow files never change, so one read per (repo, sha) is
+// enough for the whole CI wait. Unreadable answers are not cached.
+const workflowCache = new Map<string, boolean>();
+
+// Whether the head commit has a .github/workflows/*.yml|yaml that triggers on
+// a push or a PR. False only when GitHub says the directory does not exist or
+// no file in it triggers; null when it could not be read.
+export function fetchHasWorkflows(org: string, repoSlug: string, sha: string, exec: Exec = run): boolean | null {
+  const key = `${org}/${repoSlug}@${sha}`;
+  const cached = workflowCache.get(key);
+  if (cached !== undefined) return cached;
+  const listing = exec("gh", ["api", `repos/${org}/${repoSlug}/contents/.github/workflows?ref=${sha}`, "--jq", ".[] | select(.type == \"file\") | .path"]);
+  let found: boolean;
+  if (!listing.ok) {
+    if (!/Not Found|HTTP 404/.test(listing.stderr)) return null;
+    found = false;
+  } else {
+    found = false;
+    for (const path of listing.stdout.split("\n").map((line) => line.trim()).filter(isWorkflowFile)) {
+      const file = exec("gh", ["api", `repos/${org}/${repoSlug}/contents/${path}?ref=${sha}`, "-H", "Accept: application/vnd.github.raw"]);
+      if (!file.ok) return null;
+      if (workflowTriggersOnPushOrPr(file.stdout)) {
+        found = true;
+        break;
+      }
+    }
+  }
+  workflowCache.set(key, found);
+  return found;
+}
+
 // the failing step's own log, not just "CI failed" - what a human
 // reading the task needs, and what #161 hands back to a resumed agent.
 //
@@ -833,7 +939,7 @@ function prChangedFiles(prUrl: string): string[] | null {
 // which takes hours), and the force-push is safe because that branch belongs
 // to this task alone: --force-with-lease still refuses if anything else has
 // pushed to it since this clone last saw it.
-function rebaseAndPushBranch(taskId: number, repoSlug: string, branch: string): CommandResult {
+function rebaseAndPushBranch(taskId: number, repoSlug: string, branch: string): CommandResult & { unchanged?: boolean } {
   const repoPath = repoWorkdir(taskId, repoSlug);
   if (!existsSync(repoPath)) {
     return { ok: false, stdout: "", stderr: `no clone left at ${repoPath} to rebase - the task's workdir has been swept` };
@@ -848,7 +954,7 @@ function rebaseAndPushBranch(taskId: number, repoSlug: string, branch: string): 
   // poll for the whole retry window, for a merge that is not going to
   // succeed.
   if (head() === before) {
-    return { ok: false, stdout: "", stderr: "the branch is already rebased onto origin/main, so the merge is failing for some other reason" };
+    return { ok: false, unchanged: true, stdout: "", stderr: "the branch is already rebased onto origin/main, so the merge is failing for some other reason" };
   }
   return run("git", ["push", "--force-with-lease", "origin", branch], { cwd: repoPath });
 }
@@ -1017,8 +1123,20 @@ async function handleAwaitingCi(entry: PipelineTask, repos: PipelineRepo[], now:
       return park("CI unreadable", `Could not check CI for ${repo.repoSlug} for ${Math.round(elapsed / 60000)} minutes: ${reason}. Left for a human.`);
     }
 
-    const decision = evaluateCiRun(ciRun, elapsed, CI_TIMEOUT_MS, CI_APPEAR_GRACE_MS);
-    if (decision.decision === "wait") return { moved: null, note: `CI still running for ${repo.repoSlug}` };
+    const mergeable = fetchPrMergeable(repo.prUrl);
+    // Only worth reading when there is no run to go by.
+    const hasWorkflows = !ciRun && mergeable !== "CONFLICTING" ? fetchHasWorkflows(org, repo.repoSlug, headSha) : true;
+    const decision = evaluateCiRun(ciRun, elapsed, CI_TIMEOUT_MS, CI_APPEAR_GRACE_MS, { mergeable, hasWorkflows });
+    if (decision.decision === "wait") {
+      return { moved: null, note: ciRun ? `CI still running for ${repo.repoSlug}` : `waiting for a CI run for ${repo.repoSlug}` };
+    }
+    if (decision.decision === "conflict") return resolveCiConflict(entry.taskId, repo, branch, elapsed);
+    if (decision.decision === "no_run") {
+      return park(
+        `no CI run for ${repo.repoSlug}`,
+        `No CI run appeared for ${headSha} on ${repo.prUrl}; check the PR on GitHub (${decision.reason}). Not treated as a pass. Left for a human.`,
+      );
+    }
     if (decision.decision === "fail") {
       const failure = fetchCiFailure(org, repo.repoSlug, branch, run, headSha);
       const comments = await getComments(entry.taskId).catch(() => []);
@@ -1048,6 +1166,37 @@ async function handleAwaitingCi(entry: PipelineTask, repos: PipelineRepo[], now:
     holdRepos,
   });
   return { moved: decision.to, note: "CI green", comment: decision.note };
+}
+
+// A PR that conflicts with its base gets no pull_request run at all, so the
+// CI wait cannot end green. Same recovery as a merge that failed on a stale
+// branch: rebase onto the base and force-push within the merge window (the
+// new head then gets its own run), and hand the conflict to an agent when the
+// rebase cannot clear it or the window has passed.
+function resolveCiConflict(taskId: number, repo: PipelineRepo, branch: string, elapsed: number): StageOutcome {
+  let gitOutput = `the PR still conflicts with its base after ${Math.round(elapsed / 60000)} minutes`;
+  if (decideMergeFailure(elapsed) === "rebase") {
+    const rebased = rebaseAndPushBranch(taskId, repo.repoSlug, branch);
+    if (rebased.ok) return { moved: null, note: `rebased ${repo.repoSlug} onto its base after a conflict, waiting for CI` };
+    // Already on top of the base: GitHub's mergeable flag is likely still the
+    // one from before the last push. Read it again next poll.
+    if (rebased.unchanged) return { moved: null, note: `${repo.repoSlug} is already rebased, waiting for GitHub to recompute mergeability` };
+    gitOutput = rebased.stderr;
+  }
+  return handBack("merge_conflict", `PR conflicts with its base on ${repo.repoSlug}`, ciConflictComment(repo.prUrl, gitOutput), `${repo.prUrl} conflicts with its base branch, so GitHub runs no CI for it.\n\n${truncateLog(gitOutput)}`);
+}
+
+export function ciConflictComment(prUrl: string, gitOutput: string): string {
+  const files = conflictingFiles(gitOutput);
+  return [
+    `${prUrl} conflicts with its base branch, so GitHub runs no CI for it and it cannot be treated as green.`,
+    ...(files.length > 0 ? [`Conflicting files: ${files.join(", ")}.`] : []),
+    "What the automatic rebase reported:",
+    "",
+    truncateLog(gitOutput),
+    "",
+    "The conflict needs resolving on the same branch.",
+  ].join("\n");
 }
 
 // The PR's current title when its repo is public, else null (see

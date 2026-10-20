@@ -10,6 +10,11 @@ import {
   decideHealthcheckFailure,
   decideMergeFailure,
   evaluateCiRun,
+  workflowTriggersOnPushOrPr,
+  conflictingFiles,
+  ciConflictComment,
+  fetchHasWorkflows,
+  fetchPrMergeable,
   classifyDeployTargets,
   orderLibrariesFirst,
   healthcheckCommand,
@@ -78,6 +83,82 @@ test("evaluateCiRun waits for a run to appear within the grace period", () => {
 
 test("evaluateCiRun proceeds once no run has appeared after the grace period elapses", () => {
   assert.equal(evaluateCiRun(null, 30_000, 60_000, 30_000).decision, "proceed");
+});
+
+// A PR's mergeability and the head commit's workflows decide what "no run
+// yet" means. The default context (mergeable unread, no workflows) is the
+// old grace-then-proceed path, covered above.
+test("evaluateCiRun table: no run, by mergeability and workflows", () => {
+  const done = { status: "completed", conclusion: "success", url: "u" };
+  const failed = { status: "completed", conclusion: "failure", url: "u" };
+  const running = { status: "in_progress", conclusion: null, url: "u" };
+  const cases: [string, Parameters<typeof evaluateCiRun>[0], number, { mergeable: string | null; hasWorkflows: boolean | null }, string][] = [
+    ["no run + conflicting", null, 0, { mergeable: "CONFLICTING", hasWorkflows: true }, "conflict"],
+    ["no run + conflicting, no workflows, after grace", null, 120_000, { mergeable: "CONFLICTING", hasWorkflows: false }, "conflict"],
+    ["green run + conflicting", done, 0, { mergeable: "CONFLICTING", hasWorkflows: true }, "conflict"],
+    ["no run + UNKNOWN, after grace", null, 120_000, { mergeable: "UNKNOWN", hasWorkflows: false }, "wait"],
+    ["no run + UNKNOWN, after timeout", null, 600_000, { mergeable: "UNKNOWN", hasWorkflows: false }, "no_run"],
+    ["no run + workflows, after grace", null, 120_000, { mergeable: "MERGEABLE", hasWorkflows: true }, "wait"],
+    ["no run + workflows, after timeout", null, 600_000, { mergeable: "MERGEABLE", hasWorkflows: true }, "no_run"],
+    ["no run + workflows unreadable, after grace", null, 120_000, { mergeable: "MERGEABLE", hasWorkflows: null }, "wait"],
+    ["no run + no workflows, within grace", null, 1_000, { mergeable: "MERGEABLE", hasWorkflows: false }, "wait"],
+    ["no run + no workflows, after grace", null, 120_000, { mergeable: "MERGEABLE", hasWorkflows: false }, "proceed"],
+    ["no run + no workflows, mergeable unread", null, 120_000, { mergeable: null, hasWorkflows: false }, "proceed"],
+    ["green run + mergeable", done, 0, { mergeable: "MERGEABLE", hasWorkflows: true }, "proceed"],
+    ["failed run + mergeable", failed, 0, { mergeable: "MERGEABLE", hasWorkflows: true }, "fail"],
+    ["running + UNKNOWN", running, 1_000, { mergeable: "UNKNOWN", hasWorkflows: true }, "wait"],
+    ["running past timeout", running, 600_000, { mergeable: "MERGEABLE", hasWorkflows: true }, "fail"],
+  ];
+  for (const [name, run, elapsed, context, expected] of cases) {
+    assert.equal(evaluateCiRun(run, elapsed, 600_000, 60_000, context).decision, expected, name);
+  }
+});
+
+test("evaluateCiRun's no_run reason says it is not a pass and why", () => {
+  const result = evaluateCiRun(null, 1_800_000, 1_800_000, 60_000, { mergeable: "MERGEABLE", hasWorkflows: true });
+  assert.equal(result.decision, "no_run");
+  assert.match(result.decision === "no_run" ? result.reason : "", /no CI run appeared after 30 minutes, and the repo has workflows/);
+});
+
+test("workflowTriggersOnPushOrPr reads the on: key in its usual shapes", () => {
+  assert.equal(workflowTriggersOnPushOrPr("name: CI\non: push\njobs: {}\n"), true);
+  assert.equal(workflowTriggersOnPushOrPr("on: [push, pull_request]\n"), true);
+  assert.equal(workflowTriggersOnPushOrPr("on:\n  pull_request:\n    branches: [main]\njobs:\n  a: {}\n"), true);
+  assert.equal(workflowTriggersOnPushOrPr("'on':\n  pull_request_target:\n"), true);
+  assert.equal(workflowTriggersOnPushOrPr("on:\n  workflow_dispatch:\n  # push:\njobs:\n  push: {}\n"), false);
+  assert.equal(workflowTriggersOnPushOrPr("on:\n  schedule:\n    - cron: '0 0 * * *'\n"), false);
+  assert.equal(workflowTriggersOnPushOrPr("on: workflow_call\n"), false);
+});
+
+test("conflictingFiles and ciConflictComment name the files git reported", () => {
+  const output = "Auto-merging CHANGELOG.md\nCONFLICT (content): Merge conflict in CHANGELOG.md\nCONFLICT (modify/delete): app/src/x.ts deleted in HEAD\n";
+  assert.deepEqual(conflictingFiles(output), ["CHANGELOG.md", "app/src/x.ts"]);
+  const comment = ciConflictComment("https://github.com/o/r/pull/1", output);
+  assert.match(comment, /conflicts with its base branch/);
+  assert.match(comment, /Conflicting files: CHANGELOG\.md, app\/src\/x\.ts\./);
+  assert.doesNotMatch(ciConflictComment("https://github.com/o/r/pull/1", "timed out"), /Conflicting files/);
+});
+
+test("fetchHasWorkflows: a missing directory is no CI, an unreadable one is unknown", () => {
+  const notFound = () => ({ ok: false, stdout: "", stderr: "gh: Not Found (HTTP 404)" });
+  assert.equal(fetchHasWorkflows("o", "r", "sha-none", notFound), false);
+  const broken = () => ({ ok: false, stdout: "", stderr: "connection reset" });
+  assert.equal(fetchHasWorkflows("o", "r", "sha-broken", broken), null);
+  const calls: string[] = [];
+  const withCi = (_cmd: string, args: string[]) => {
+    calls.push(args[1]);
+    if (args[1].includes("contents/.github/workflows?")) return { ok: true, stdout: ".github/workflows/README.md\n.github/workflows/ci.yml\n", stderr: "" };
+    return { ok: true, stdout: "on:\n  pull_request:\n", stderr: "" };
+  };
+  assert.equal(fetchHasWorkflows("o", "r", "sha-ci", withCi), true);
+  assert.equal(calls.length, 2, "README.md is not a workflow file");
+  assert.equal(fetchHasWorkflows("o", "r", "sha-ci", withCi), true);
+  assert.equal(calls.length, 2, "cached per sha");
+});
+
+test("fetchPrMergeable reads gh's mergeable field, null on failure", () => {
+  assert.equal(fetchPrMergeable("u", () => ({ ok: true, stdout: "CONFLICTING\n", stderr: "" })), "CONFLICTING");
+  assert.equal(fetchPrMergeable("u", () => ({ ok: false, stdout: "", stderr: "x" })), null);
 });
 
 test("evaluateCiRun waits while a run is still in progress and under the timeout", () => {

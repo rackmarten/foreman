@@ -39,6 +39,13 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- The CI wait no longer reads "no run found" as green when the repo has CI.
+  A PR that conflicts with its base (which gets no `pull_request` run) is
+  rebased onto its base automatically and otherwise handed back as a merge
+  conflict naming the conflicting files; an `UNKNOWN` mergeable state waits;
+  a head commit with push or pull_request workflows waits for its run and
+  parks after the CI timeout instead of proceeding. Only a repo without
+  workflow files keeps the 60-second grace-then-proceed path.
 - Dispatch skipped a queued task silently when no enabled seat had an
   eligible agent for it (for example, the only agent's executor was not
   `cli`), leaving it in `queued` forever. It now logs
