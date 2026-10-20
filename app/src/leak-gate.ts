@@ -2,7 +2,8 @@
 // is pushed to a repo in a public GitHub org (pipeline.ts's isPublicRepo),
 // homelab's scripts/leak-check.sh runs over the branch's new commits
 // (--log origin/<base>..HEAD) and, on stdin, the added lines of
-// `git diff origin/<base>...HEAD` followed by the PR title and body. A hit,
+// `git diff origin/<base>...HEAD` followed by the PR title and body (and the
+// branch name, when the push creates the branch). A hit,
 // a missing pattern file or script, or exit 3 (no patterns) blocks the push.
 //
 // leak-check.sh reports stdin hits as "stdin:<n>", so the stdin text is built
@@ -52,9 +53,18 @@ export interface ScanLocation {
   label: string;
 }
 
-export function buildScanInput(added: readonly AddedLine[], title: string, body: string): { text: string; locations: ScanLocation[] } {
+export function buildScanInput(
+  added: readonly AddedLine[],
+  title: string,
+  body: string,
+  branchName: string | null = null,
+): { text: string; locations: ScanLocation[] } {
   const lines: string[] = [];
   const locations: ScanLocation[] = [];
+  if (branchName !== null) {
+    lines.push(branchName);
+    locations.push({ file: null, label: "branch name" });
+  }
   for (const a of added) {
     lines.push(a.text);
     locations.push({ file: a.file, label: `${a.file}:${a.line}` });
@@ -126,6 +136,10 @@ export interface LeakGateOptions {
   // Injected in tests: runs `bash <args>` in cwd with input, returns exit code and output.
   exec?: (args: string[], cwd: string, input: string) => { status: number | null; stdout: string; stderr: string };
   git?: (args: string[], cwd: string) => string;
+  // The branch about to be created on origin. Left out for a branch origin
+  // already has, since its name is public by then and a later push changes
+  // nothing about it.
+  branchName?: string | null;
 }
 
 function defaultExec(args: string[], cwd: string, input: string) {
@@ -162,7 +176,7 @@ export function leakGateForPush(
   } catch (err) {
     return { blocked: true, hits: [], reason: err instanceof Error ? err.message : String(err) };
   }
-  const { text, locations } = buildScanInput(addedLines(diff), title, body);
+  const { text, locations } = buildScanInput(addedLines(diff), title, body, opts.branchName ?? null);
   const allowPath = join(repoPath, ".leak-allow");
   const allow = existsSync(allowPath) ? parseLeakAllow(readFileSync(allowPath, "utf8")) : [];
 

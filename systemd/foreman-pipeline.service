@@ -21,7 +21,7 @@
 # enable-linger marek`, one-time root step) - without it, systemd tears down
 # marek's whole --user instance shortly after the last login session ends.
 [Unit]
-Description=foreman post-PR pipeline poller (pinboard #154)
+Description=foreman post-PR pipeline poller
 After=network-online.target
 Wants=network-online.target
 

@@ -125,3 +125,37 @@ test("exit 1 with no hit lines is a script failure and blocks", () => {
     f.cleanup();
   }
 });
+
+test("buildScanInput puts the branch name first when one is given", () => {
+  const { text, locations } = buildScanInput([], "t", "b", "fix-ci");
+  assert.equal(text, "fix-ci\nt\nb\n");
+  assert.deepEqual(locations[0], { file: null, label: "branch name" });
+  assert.equal(buildScanInput([], "t", "b").locations[0].label, "PR title");
+});
+
+test("a branch name with a task id blocks a public push and passes a private one", () => {
+  // stdin line 1 is the branch name when one is passed
+  const f = gateFixture(1, "P26 stdin:1\n");
+  try {
+    const opts = { ...f.opts, branchName: "task-832" };
+    const gated = leakGateForPush(f.dir, "main", true, "Add: launcher", "Summary", opts);
+    assert.ok(gated.blocked);
+    assert.deepEqual(gated.hits, [{ id: "P26", location: "branch name" }]);
+    assert.match(f.calls[0].input, /^task-832\nFixes ticket #12\./);
+    assert.deepEqual(leakGateForPush(f.dir, "main", false, "Add: launcher", "Summary", opts), { blocked: false });
+    assert.equal(f.calls.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a .leak-allow entry never covers the branch name", () => {
+  const f = gateFixture(1, "P26 stdin:1\n");
+  try {
+    writeFileSync(join(f.dir, ".leak-allow"), "*:P26\n");
+    const gated = leakGateForPush(f.dir, "main", true, "t", "b", { ...f.opts, branchName: "task-832" });
+    assert.ok(gated.blocked);
+  } finally {
+    f.cleanup();
+  }
+});

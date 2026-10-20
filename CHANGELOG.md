@@ -26,6 +26,15 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   CI run.
 
 ### Changed
+- Task branches no longer carry the task id when a task touches a public
+  repo: they are named after the task title (`add-player-launcher`, with
+  `-2`, `-3`, ... if origin already has that name), and `<id>-<slug>` for
+  private-only tasks, instead of `task-<id>`. The name is decided on the first
+  attempt and read back from the task's PRs or clone afterwards, so later
+  attempts and repair handbacks keep it. Branches already pushed keep their
+  old names.
+- The pre-push leak gate also scans the branch name when a push creates the
+  branch on a public repo; a hit blocks the push like any other.
 - The pipeline's CI wait defaults to 30 minutes (was 10), so a cold build on
   a slow runner is no longer read as a CI failure.
 

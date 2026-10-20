@@ -1096,14 +1096,31 @@ push to a private and a public repo at once.
   "Closes pinboard task" line or the collapsed agent detail. The squash
   merge passes its own `--subject` (the PR title without a `(pinboard #<id>)`
   suffix, plus `(#<PR number>)`), so a PR opened before its repo went public
-  still merges clean. Foreman posts no other comments on GitHub. Branch names
-  stay `task-<n>`; squash merges keep them off `main`.
+  still merges clean. Foreman posts no other comments on GitHub.
+- **Branch names** (`chooseTaskBranch` in `app/src/workdir.ts`). A task
+  whose repos include a public one gets `<slug>`, with no task id, e.g.
+  `add-player-launcher`; any other task gets `<id>-<slug>`, e.g.
+  `832-add-player-launcher`. The slug is the task title lowercased, accents
+  folded to ASCII, anything else turned into word breaks, at most 5 words and
+  40 characters. An empty slug falls back to `task-<id>` (private) or
+  `change` (public). A public name that any public target's origin already
+  has gets `-2`, `-3`, ... until it is free, so another task's branch (an
+  open PR's head always exists on origin) is never reused. The name is
+  decided once, on the first attempt: every later attempt, repair handback
+  and second repo's PR reads it back from the task's PR rows in pinboard
+  (`branchName`) or the branch the task's existing clone is on, never from
+  the title again. One name covers all of a task's repos, so its private
+  repos get the public shape too when one repo is public. Workdirs stay
+  `task-<id>`; they are never pushed.
 - **Pre-push leak gate** (`app/src/leak-gate.ts`). Before pushing a task
   branch to a public repo, foreman runs homelab's `scripts/leak-check.sh`
   from the workspace clone with `--patterns public-leak-patterns.txt --log
   origin/<base>..HEAD --stdin`, feeding it the added lines of `git diff
-  origin/<base>...HEAD` and the PR title and body. Stdin hits are mapped back
-  to `<file>:<line>` or the PR title/body, and diff hits matching the repo's
+  origin/<base>...HEAD`, the PR title and body, and the branch name when this
+  push creates the branch (one origin already has is public by then, so a
+  repair push to an older `task-<id>` branch still goes through). Stdin hits
+  are mapped back to `<file>:<line>`, the PR title/body or `branch name`, and
+  diff hits matching the repo's
   `.leak-allow` are dropped. Any remaining hit, exit 3 (no patterns), a
   missing script or pattern file, or a script error blocks the push: the task
   goes to `rework` with a comment listing pattern ids and locations, never
@@ -1141,7 +1158,7 @@ by the runner and removed by its sweep:
   operator's Linux user and `fs.protected_hardlinks` forbids linking a
   read-only file you neither own nor can write), then `origin` is
   repointed at GitHub and
-  the task's branch (`task-<id>`) is cut from `origin/main` - not from the
+  the task's branch (see "Branch names" above) is cut from `origin/main` - not from the
   workspace checkout's own `main`, which can be days stale.
 - **node_modules is copied, not installed**, for each package directory whose
   `package-lock.json` is byte-identical to the workspace checkout's. A real
@@ -1232,9 +1249,9 @@ Task workdirs are not part of this; the dispatcher's own sweep handles those
 
 ## Container image
 
-Story #514 moved the runner from the systemd `--user` units into Docker
-Compose: a past task added the image and compose file, #517 the state layout,
-#518 the cutover. Deploy with `scripts/deploy.sh` rather than a bare
+The runner moved from the systemd `--user` units into Docker Compose in
+three steps: the image and compose file, the state layout, then the
+cutover. Deploy with `scripts/deploy.sh` rather than a bare
 `docker compose up`, which would recreate a busy service. One-off
 `docker compose run --rm dispatch <command>` is always safe.
 

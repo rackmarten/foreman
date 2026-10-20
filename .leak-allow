@@ -1,0 +1,5 @@
+# Leak-check exceptions: <path-glob>:<id>. Only for functional identifiers,
+# never for prose.
+# Test fixtures name task branches, workdirs and PR titles in the shapes
+# foreman itself produces (task-<n>, /app/tasks/task-<n>/..., "(pinboard #<n>)").
+app/src/*.test.ts:P26

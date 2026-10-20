@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  branchSlug,
+  chooseTaskBranch,
+  currentBranch,
+  proposedTaskBranch,
+  taskWorkdirBranch,
+  withCollisionSuffix,
   deployLockPath,
   ensureTaskClone,
   isStaleLock,
@@ -544,4 +550,86 @@ test("isSweepable never ages out a task that may still run in its checkout", () 
     assert.equal(isSweepable({ status, updatedAt: old }, now, retention), false, status);
   }
   assert.equal(isSweepable({ status: "handoff", updatedAt: old }, now, retention), true);
+});
+
+test("branchSlug lowercases, folds accents and turns punctuation into word breaks", () => {
+  assert.equal(branchSlug("Add: player launcher!"), "add-player-launcher");
+  assert.equal(branchSlug("  Fix   the (CI) -- timeout... "), "fix-the-ci-timeout");
+  assert.equal(branchSlug("Príliš žluťoučký kůň"), "prilis-zlutoucky-kun");
+  assert.equal(branchSlug("Ünïcödé 日本語 emoji 🚀 ok"), "unicode-emoji-ok");
+});
+
+test("branchSlug keeps at most 5 words and 40 chars, with no trailing hyphen", () => {
+  assert.equal(branchSlug("one two three four five six seven"), "one-two-three-four-five");
+  const long = branchSlug("Reconcile the deployment orchestration pipeline's retries");
+  assert.ok(long.length <= 40, long);
+  assert.equal(long, "reconcile-the-deployment-orchestration");
+  assert.doesNotMatch(long, /-$/);
+  assert.equal(branchSlug("a".repeat(60)), "a".repeat(40));
+});
+
+test("branchSlug of a title with nothing usable is empty", () => {
+  assert.equal(branchSlug(""), "");
+  assert.equal(branchSlug("!!! ??? 日本語"), "");
+});
+
+test("proposedTaskBranch: public repos get the slug only, private ones <id>-<slug>", () => {
+  assert.equal(proposedTaskBranch(832, "Add player launcher", true), "add-player-launcher");
+  assert.equal(proposedTaskBranch(832, "Add player launcher", false), "832-add-player-launcher");
+  assert.equal(proposedTaskBranch(832, "???", false), taskBranch(832));
+  assert.equal(proposedTaskBranch(832, "???", true), "change");
+});
+
+test("withCollisionSuffix appends -2, -3, ... until the name is free", () => {
+  assert.equal(withCollisionSuffix("fix-ci", () => false), "fix-ci");
+  const taken = new Set(["fix-ci", "fix-ci-2"]);
+  assert.equal(withCollisionSuffix("fix-ci", (n) => taken.has(n)), "fix-ci-3");
+  assert.throws(() => withCollisionSuffix("fix-ci", () => true, 3), /no free branch name/);
+});
+
+test("chooseTaskBranch reuses a recorded or cloned branch before deriving one", () => {
+  const base = { taskId: 9, title: "Renamed title", isPublic: true, taken: () => false };
+  assert.equal(chooseTaskBranch({ ...base, recorded: "original-title", cloneBranch: "other" }), "original-title");
+  assert.equal(chooseTaskBranch({ ...base, recorded: null, cloneBranch: "original-title" }), "original-title");
+  assert.equal(chooseTaskBranch({ ...base, recorded: "task-9", cloneBranch: null }), "task-9");
+  assert.equal(chooseTaskBranch({ ...base, recorded: null, cloneBranch: null }), "renamed-title");
+  assert.equal(
+    chooseTaskBranch({ ...base, recorded: null, cloneBranch: null, taken: (n) => n === "renamed-title" }),
+    "renamed-title-2",
+  );
+  // a private name has the id in it, so it cannot collide with another task's
+  assert.equal(chooseTaskBranch({ ...base, isPublic: false, recorded: null, cloneBranch: null, taken: () => true }), "9-renamed-title");
+});
+
+test("a later attempt reads the branch back from the clone instead of the title", () => {
+  const root = mkdtempSync(join(tmpdir(), "branch-reuse-"));
+  const git = (args: string[], cwd: string): string =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" }).toString();
+  try {
+    const source = join(root, "source");
+    mkdirSync(source);
+    git(["init", "-q", "-b", "main"], source);
+    writeFileSync(join(source, "f.txt"), "x\n");
+    git(["add", "f.txt"], source);
+    git(["commit", "-qm", "base"], source);
+    const tasks = join(root, "tasks");
+    const first = proposedTaskBranch(77, "Add player launcher", true);
+    const dest = ensureTaskClone({ taskId: 77, repoSlug: "source", sourceRepo: source, branch: first, root: tasks });
+    assert.equal(currentBranch(dest), "add-player-launcher");
+    assert.equal(taskWorkdirBranch(77, tasks), "add-player-launcher");
+    const again = chooseTaskBranch({
+      taskId: 77,
+      title: "Add a game launcher instead",
+      recorded: null,
+      cloneBranch: currentBranch(dest),
+      isPublic: true,
+      // its own branch being on origin is not a collision when it is read back
+      taken: () => true,
+    });
+    assert.equal(again, first);
+    assert.equal(currentBranch(join(root, "missing")), null);
+    assert.equal(taskWorkdirBranch(78, tasks), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

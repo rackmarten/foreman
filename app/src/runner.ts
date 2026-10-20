@@ -68,12 +68,16 @@ import {
   ensureTaskClone,
   isSweepable,
   pruneTrustedWorkdirs,
+  chooseTaskBranch,
+  currentBranch,
   rebaseOntoMain,
+  remoteBranchExists,
   removeTaskWorkdir,
   repoWorkdir,
   resolveDefaultBranch,
   taskBranch,
   taskWorkdir,
+  taskWorkdirBranch,
 } from "./workdir.js";
 import { classifyAttemptFailure } from "./session-limit.js";
 import {
@@ -366,7 +370,7 @@ export function recordedWorkspaceRoot(taskId: number, root: string = TASK_ROOT):
 export function cloneRelatedRepoMidRun(taskId: number, related: Project, root: string = TASK_ROOT): string | null {
   if (!related.localPath || !existsSync(taskWorkdir(taskId, root))) return null;
   const target = repoTargetFor(taskId, related, root, recordedWorkspaceRoot(taskId, root));
-  ensureTaskClones(taskId, [target], taskBranch(taskId), root);
+  ensureTaskClones(taskId, [target], taskWorkdirBranch(taskId, root) ?? taskBranch(taskId), root);
   return target.repoPath;
 }
 
@@ -820,7 +824,7 @@ export async function prepareAttempt(
   const primary = targets[0];
   if (!existsSync(primary.repoPath)) return { mode: "fresh" };
 
-  const branch = taskBranch(task.id);
+  const branch = currentBranch(primary.repoPath) ?? taskBranch(task.id);
   const failure = targets
     .filter((t) => existsSync(t.repoPath))
     .map((t) => rebaseOntoMain(t.repoPath, branch))
@@ -944,6 +948,28 @@ function branchHasCommits(repoPath: string, branch: string): boolean {
   }
 }
 
+// A fresh attempt's branch name (see workdir.ts's chooseTaskBranch). Read
+// before the old workdir is cleaned up, since its clone's branch is one of
+// the places the name is kept. One name serves every repo of the task, so a
+// task touching any public repo gets the public, id-free shape everywhere.
+export async function resolveTaskBranch(
+  task: Pick<Task, "id" | "title">,
+  targets: readonly RepoTarget[],
+  listPrs: (taskId: number) => Promise<Array<{ branchName: string | null }>> = (id) => withPinboardRetry(() => listPullRequests(id)),
+  isPublic: (localPath: string | null) => boolean = (localPath) => isPublicRepo(localPath),
+): Promise<string> {
+  const recorded = (await listPrs(task.id)).find((pr) => pr.branchName)?.branchName ?? null;
+  const publicTargets = targets.filter((t) => isPublic(t.project.localPath));
+  return chooseTaskBranch({
+    taskId: task.id,
+    title: task.title,
+    recorded,
+    cloneBranch: targets.map((t) => currentBranch(t.repoPath)).find((b): b is string => b !== null) ?? null,
+    isPublic: publicTargets.length > 0,
+    taken: (name) => publicTargets.some((t) => remoteBranchExists(t.sourceRepo, name)),
+  });
+}
+
 async function runOneAttempt(
   task: Task,
   project: Project,
@@ -958,11 +984,11 @@ async function runOneAttempt(
   // one branch and one workdir per task (not per attempt), so a
   // later attempt resumes the same clone - the same property a past task relied
   // on the fixed worktree name for.
-  const branch = resume?.branch ?? taskBranch(task.id);
   const primaryTarget = repoTargetFor(task.id, project);
   const relatedTargets = relatedRepoTargets(task, project, allProjects);
   const targets = [primaryTarget, ...relatedTargets];
   const repoPaths = targets.map((t) => t.repoPath);
+  let branch = resume?.branch ?? taskBranch(task.id);
   // this used to throw straight out of runOneAttempt on a git
   // failure (e.g. a stale worktree/branch left by an interrupted earlier
   // attempt) - runTask's caller has no catch around this call, so the whole
@@ -974,7 +1000,10 @@ async function runOneAttempt(
     // A fresh attempt starts from a clean workdir: anything left by an
     // earlier attempt (or a rebase-conflict fallback in this same run) goes,
     // rather than being reused half-way.
-    if (!resume) cleanupWorkdir(task.id);
+    if (!resume) {
+      branch = await resolveTaskBranch(task, targets);
+      cleanupWorkdir(task.id);
+    }
     ensureTaskClones(task.id, targets, branch);
     recordWorkspaceRoot(task.id);
     for (const path of repoPaths) ensureWorkspaceTrusted(path);
@@ -1545,10 +1574,10 @@ async function pushAndOpenPr(
   const isPublic = isPublicRepo(project.localPath);
   const title = formatPrTitle(task, isPublic, isPublic ? firstCommitSubject(repoPath, base) : null);
   const body = formatPrBody(task, project, handoff, changedFiles(repoPath, base, branch), isPublic);
-  const gate = leakGateForPush(repoPath, base, isPublic, title, body);
+  const before = remoteBranchSha(repoPath, branch);
+  const gate = leakGateForPush(repoPath, base, isPublic, title, body, { branchName: before === null ? branch : null });
   if (gate.blocked) throw new LeakBlockedError(basename(project.localPath as string), gate);
 
-  const before = remoteBranchSha(repoPath, branch);
   pushTaskBranch(repoPath, branch, needsForce, before);
 
   // the lookup is unconditional, not resume-only. A repair handback
