@@ -61,8 +61,18 @@ export const DEFAULT_PIPELINE_INTERVAL_SECONDS = 30;
 
 // I13's CI wait, unchanged in substance - the clock is now the stage's own
 // `pipelineStageEnteredAt` rather than a loop-local start time, so it
-// survives this process restarting.
-const CI_TIMEOUT_MS = 10 * 60 * 1000;
+// survives this process restarting. 30 minutes by default, so a cold build
+// on a slow runner is not read as a failure; FOREMAN_CI_TIMEOUT_MINUTES
+// overrides it per install.
+export const DEFAULT_CI_TIMEOUT_MINUTES = 30;
+
+export function ciTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.FOREMAN_CI_TIMEOUT_MINUTES);
+  const minutes = Number.isFinite(raw) && raw > 0 && env.FOREMAN_CI_TIMEOUT_MINUTES !== "" ? raw : DEFAULT_CI_TIMEOUT_MINUTES;
+  return minutes * 60 * 1000;
+}
+
+const CI_TIMEOUT_MS = ciTimeoutMs();
 // `gh run list` can come back empty for a few seconds right after
 // a push while GitHub registers the workflow. A past task merged 4 seconds
 // after opening its PR because that gap read as "this repo has no CI".
