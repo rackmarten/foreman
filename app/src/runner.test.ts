@@ -37,6 +37,7 @@ import {
   remoteBranchSha,
   relatedRepoLines,
   relatedTargetsAfterSession,
+  resolveTaskBranch,
   cloneRelatedRepoMidRun,
   recordWorkspaceRoot,
   repairPromptLines,
@@ -1198,4 +1199,25 @@ test("publicRepoRulesLines names exactly the public repos, and is empty with non
   assert.equal(text.match(/^  - /gm)?.length, 2);
   assert.match(text, /task numbers/);
   assert.match(text, /\/ws\/patterns\.txt/);
+});
+
+test("resolveTaskBranch: public slug with a collision suffix, private <id>-<slug>, recorded name reused", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foreman-resolve-branch-"));
+  try {
+    const { repoPath } = taskClone(root, 5);
+    // another task already has the plain slug on origin
+    git(repoPath, ["push", "origin", "main:refs/heads/add-player-launcher"]);
+    const tasks = join(root, "tasks");
+    const target = { project: project({ localPath: "repo" }), repoPath: repoWorkdir(6, "repo", tasks), sourceRepo: repoPath };
+    const t = { id: 6, title: "Add player launcher" };
+    const none = async () => [];
+    assert.equal(await resolveTaskBranch(t, [target], none, () => true), "add-player-launcher-2");
+    assert.equal(await resolveTaskBranch(t, [target], none, () => false), "6-add-player-launcher");
+    const recorded = async () => [{ branchName: null }, { branchName: "add-player-launcher-2" }];
+    assert.equal(await resolveTaskBranch({ ...t, title: "Renamed later" }, [target], recorded, () => true), "add-player-launcher-2");
+    // an older task keeps its legacy name
+    assert.equal(await resolveTaskBranch(t, [target], async () => [{ branchName: "task-6" }], () => true), "task-6");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

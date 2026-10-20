@@ -45,7 +45,7 @@ import {
   type UpdateTaskInput,
 } from "./pinboard.js";
 import { DEFAULT_DISPATCH_INTERVAL_SECONDS, DEFAULT_RUN_OPTIONS, cloneRelatedRepoMidRun, runDispatchLoop, runTask } from "./runner.js";
-import { taskBranch } from "./workdir.js";
+import { currentBranch } from "./workdir.js";
 import { DEFAULT_PIPELINE_INTERVAL_SECONDS, pipelineOnce, runPipelineLoop } from "./pipeline.js";
 import { DEFAULT_PROBE_INTERVAL_SECONDS, probeAll, runNextDeployRequest } from "./releases.js";
 import {
@@ -504,7 +504,7 @@ async function taskAddRelatedRepo(args: string[]): Promise<void> {
   // cloneRelatedRepoMidRun). On a workstation there is no task workdir, and
   // this only records the relation, as before.
   const clonePath = cloneRelatedRepoMidRun(task.id, project);
-  if (clonePath) console.log(`Clone of '${project.slug}' on branch ${taskBranch(task.id)}: ${clonePath} - work and commit there.`);
+  if (clonePath) console.log(`Clone of '${project.slug}' on branch ${currentBranch(clonePath) ?? "?"}: ${clonePath} - work and commit there.`);
 }
 
 async function taskClaim(args: string[]): Promise<void> {

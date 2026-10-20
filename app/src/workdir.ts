@@ -56,8 +56,99 @@ export function repoWorkdir(taskId: number, repoSlug: string, root: string = TAS
 // One branch name per task, not per attempt - a later attempt resumes the
 // same clone and keeps committing on it, exactly as the worktree scheme's
 // `worktree-task-<id>-session` did.
+// The legacy shape, still used for a private repo whose title has no usable
+// slug, and the last-resort fallback where no branch name is known.
 export function taskBranch(taskId: number): string {
   return `task-${taskId}`;
+}
+
+const BRANCH_SLUG_MAX_WORDS = 5;
+const BRANCH_SLUG_MAX_CHARS = 40;
+
+// The task title as a branch slug: accents folded to ASCII, anything else
+// that is not a letter or digit splits words, at most 5 words and 40 chars,
+// cut at a word boundary where one fits.
+export function branchSlug(title: string): string {
+  const words = title
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .slice(0, BRANCH_SLUG_MAX_WORDS);
+  let slug = "";
+  for (const word of words) {
+    const next = slug ? `${slug}-${word}` : word;
+    if (next.length > BRANCH_SLUG_MAX_CHARS) {
+      if (!slug) slug = word.slice(0, BRANCH_SLUG_MAX_CHARS);
+      break;
+    }
+    slug = next;
+  }
+  return slug;
+}
+
+// A public repo's branch never carries the task id: `<slug>`, or `change`
+// for a title with nothing usable in it. A private repo's is `<id>-<slug>`.
+export function proposedTaskBranch(taskId: number, title: string, isPublic: boolean): string {
+  const slug = branchSlug(title);
+  if (isPublic) return slug || "change";
+  return slug ? `${taskId}-${slug}` : taskBranch(taskId);
+}
+
+// `base`, or `base-2`, `base-3`, ... for the first name `taken` says is free.
+export function withCollisionSuffix(base: string, taken: (name: string) => boolean, limit = 100): string {
+  if (!taken(base)) return base;
+  for (let n = 2; n <= limit; n++) {
+    if (!taken(`${base}-${n}`)) return `${base}-${n}`;
+  }
+  throw new Error(`no free branch name for ${base} (tried up to -${limit})`);
+}
+
+// Where a task's branch name comes from, in order: the one already recorded
+// on its PRs in pinboard, the branch an existing clone of the task is on,
+// and only when neither exists, a new name from the title. Decided once, so a
+// later attempt, a repair handback or a second repo's PR never re-derives it
+// from a title that may have changed since. A public name is suffixed until
+// no public target's origin has it, so another task's branch is never reused.
+export interface ChooseTaskBranchInput {
+  taskId: number;
+  title: string;
+  recorded: string | null;
+  cloneBranch: string | null;
+  isPublic: boolean;
+  taken: (name: string) => boolean;
+}
+
+export function chooseTaskBranch(input: ChooseTaskBranchInput): string {
+  if (input.recorded) return input.recorded;
+  if (input.cloneBranch) return input.cloneBranch;
+  const base = proposedTaskBranch(input.taskId, input.title, input.isPublic);
+  return input.isPublic ? withCollisionSuffix(base, input.taken) : base;
+}
+
+// The branch checked out in a clone, or null when there is no clone (or it
+// is on a detached HEAD).
+export function currentBranch(repoPath: string): string | null {
+  if (!existsSync(repoPath)) return null;
+  try {
+    const out = execFileSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repoPath, stdio: "pipe" }).toString().trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+// The branch of whichever clone the task workdir already holds, for a repo
+// cloned mid-run onto the same branch as the rest.
+export function taskWorkdirBranch(taskId: number, root: string = TASK_ROOT): string | null {
+  const repos = join(taskWorkdir(taskId, root), "repos");
+  if (!existsSync(repos)) return null;
+  for (const name of readdirSync(repos).sort()) {
+    const branch = currentBranch(join(repos, name));
+    if (branch) return branch;
+  }
+  return null;
 }
 
 export function parseTaskWorkdirName(name: string): number | null {
@@ -166,11 +257,11 @@ export interface CloneOptions {
 // local clone actually inherits is whichever branch that shared checkout
 // happened to have checked out at the exact moment this task's own clone
 // was cut - not the repo's real default branch. A human/agent had that
-// shared pinboard checkout on `task-174` for a few minutes on 2026-09-17
+// shared pinboard checkout on another task's branch for a few minutes on 2026-09-17
 // while a past task's workdir was being re-cloned after an earlier rebase
-// conflict; the clone silently inherited `task-174` as its "default branch"
+// conflict; the clone silently inherited that branch as its "default branch"
 // and carried it, dormant, for the next 11 hours, until this function
-// started being consulted and a fetch of the long-since-merged `task-174`
+// started being consulted and a fetch of that long-since-merged branch
 // failed - which the caller (rebaseOntoMain's caller in runner.ts) reads as
 // a rebase conflict and responds to by deleting the retained workdir. That
 // destroyed the one on-disk copy of a real, already-committed fix that had
