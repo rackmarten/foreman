@@ -46,6 +46,7 @@ import {
   getTaskRelations,
   type RootGrant,
   type Actor,
+  type HandoffInput,
   type Agent,
   type Comment,
   type License,
@@ -184,6 +185,9 @@ interface HandoffFields {
   summary: string;
   // short steps a reviewer can follow to check the change.
   howToVerify: string;
+  // optional: one short, testable line per thing a human has to check by
+  // hand. Empty or omitted when there is nothing to check by hand.
+  checklist?: string[];
   completed: string;
   changed: string;
   verified: string;
@@ -196,11 +200,12 @@ interface HandoffFields {
   outcome?: "already_done" | "rejected" | null;
 }
 
-const HANDOFF_SCHEMA = {
+export const HANDOFF_SCHEMA = {
   type: "object",
   properties: {
     summary: { type: "string" },
     howToVerify: { type: "string" },
+    checklist: { type: "array", items: { type: "string" } },
     completed: { type: "string" },
     changed: { type: "string" },
     verified: { type: "string" },
@@ -559,7 +564,10 @@ export function handoffSummaryPolicy(): string {
       "at most 5 short lines of markdown saying what changed and whether it works. If anything is " +
       'left for a human (a deploy, a manual check, an open question, a denied tool), end it with ' +
       'one line starting "Needs you:". `howToVerify` is a few short steps a reviewer can follow ' +
-      "to check the change. The other fields carry the full detail.",
+      "to check the change. `checklist` is one short, testable line per thing a human has to " +
+      "check by hand (play, feel, look, browser), with no items for what the automated tests " +
+      "already prove; leave it empty or omit it when there is nothing to check by hand. The " +
+      "other fields carry the full detail.",
     "If you end without commits because the task needs none, set `outcome`: `already_done` when " +
       "everything it asks for is already in place (say in `verified` how you checked), or " +
       "`rejected` when the task itself says to reject it in this case (put the reason in " +
@@ -1610,6 +1618,24 @@ async function pushAndOpenPr(
 // too means a human checking what an attempt did can read it in the comment
 // thread instead of scrolling activity, same as the 8ball executor path already does
 // by commenting its result alongside its own submitHandoff call.
+// the agent's handoff fields as pinboard's handoff endpoint takes them.
+// `checklist` is sent unconditionally: a pinboard that doesn't store it yet
+// ignores the extra field.
+export function handoffInputFields(handoff: HandoffFields): Omit<HandoffInput, keyof Actor | "agentName"> {
+  const checklist = (handoff.checklist ?? []).map((item) => item.trim()).filter(Boolean);
+  return {
+    completed: handoff.completed,
+    changed: handoff.changed,
+    verified: handoff.verified,
+    problems: handoff.problems,
+    discovered: handoff.discovered,
+    next: handoff.next,
+    summary: handoff.summary || undefined,
+    checklist: checklist.length ? checklist : undefined,
+    estimatedNextEffort: handoff.estimatedNextEffort ?? undefined,
+  };
+}
+
 export function formatHandoffComment(handoff: Omit<HandoffFields, "summary" | "howToVerify"> & { summary?: string }): string {
   const sections: Array<[string, string]> = [
     ["TL;DR", handoff.summary ?? ""],
@@ -2142,14 +2168,7 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
     const handoff = await submitHandoff(taskId, {
       ...actor,
       agentName: actor.actorName,
-      completed: outcome.handoff.completed,
-      changed: outcome.handoff.changed,
-      verified: outcome.handoff.verified,
-      problems: outcome.handoff.problems,
-      discovered: outcome.handoff.discovered,
-      next: outcome.handoff.next,
-      summary: outcome.handoff.summary || undefined,
-      estimatedNextEffort: outcome.handoff.estimatedNextEffort ?? undefined,
+      ...handoffInputFields(outcome.handoff),
       costUsd: String(outcome.totalCostUsd),
       durationMs: outcome.durationMs,
       numTurns: outcome.numTurns,

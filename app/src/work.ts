@@ -39,6 +39,7 @@ import {
   answerAsk,
   createAsk,
   type Actor,
+  type HandoffInput,
   type Project,
   type Task,
   type TaskRelation,
@@ -97,6 +98,7 @@ function usage(): void {
       "                          [--discovered=] [--next=] [--effort=] [--cost=]",
       "                          [--duration-ms=] [--turns=] [--agent=<agentName>]",
       "                          [--summary=<markdown TL;DR, at most 5 lines>]",
+      "                          [--checklist=<item to check by hand>]... (repeatable)",
       "  work task complete <id>",
       "  work task ask <id> <question...> [--wait-seconds=90] [--poll-interval-seconds=5]",
       "    I9: for a session's own use while it's running (Bash-allowed, see",
@@ -528,28 +530,37 @@ async function taskComment(args: string[]): Promise<void> {
   console.log(`Comment #${comment.id} added.`);
 }
 
-async function taskHandoff(args: string[]): Promise<void> {
+export function parseHandoffArgs(args: string[]): { id: number; input: Omit<HandoffInput, keyof Actor> } {
   const id = Number(args[0]);
+  const flags = parseFlags(args.slice(1));
+  const checklist = repeatedFlag(args.slice(1), "checklist").map((item) => item.trim()).filter(Boolean);
+  return {
+    id,
+    input: {
+      agentName: flags.agent,
+      completed: flags.completed,
+      changed: flags.changed,
+      verified: flags.verified,
+      problems: flags.problems,
+      discovered: flags.discovered,
+      next: flags.next,
+      summary: flags.summary,
+      checklist: checklist.length ? checklist : undefined,
+      estimatedNextEffort: flags.effort ? Number(flags.effort) : undefined,
+      costUsd: flags.cost,
+      durationMs: flags["duration-ms"] ? Number(flags["duration-ms"]) : undefined,
+      numTurns: flags.turns ? Number(flags.turns) : undefined,
+    },
+  };
+}
+
+async function taskHandoff(args: string[]): Promise<void> {
+  const { id, input } = parseHandoffArgs(args);
   if (!id) {
     usage();
     process.exit(2);
   }
-  const flags = parseFlags(args.slice(1));
-  const handoff = await submitHandoff(id, {
-    ...currentActor(),
-    agentName: flags.agent,
-    completed: flags.completed,
-    changed: flags.changed,
-    verified: flags.verified,
-    problems: flags.problems,
-    discovered: flags.discovered,
-    next: flags.next,
-    summary: flags.summary,
-    estimatedNextEffort: flags.effort ? Number(flags.effort) : undefined,
-    costUsd: flags.cost,
-    durationMs: flags["duration-ms"] ? Number(flags["duration-ms"]) : undefined,
-    numTurns: flags.turns ? Number(flags.turns) : undefined,
-  });
+  const handoff = await submitHandoff(id, { ...currentActor(), ...input });
   console.log(`Handoff #${handoff.id} recorded, task ${id} moved to handoff.`);
 }
 

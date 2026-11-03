@@ -7,6 +7,7 @@ import {
   parseAnswerArgs,
   parseAssumeArgs,
   parseFlags,
+  parseHandoffArgs,
   parseUpdateArgs,
   positionals,
   repeatedFlag,
@@ -187,4 +188,19 @@ test("parseAnswerArgs reads a 1-based option, extra text, or free text", () => {
   assert.throws(() => parseAnswerArgs(["12"]), /option number or text/);
   assert.throws(() => parseAnswerArgs(["x", "1"]), /ask id/);
   assert.throws(() => parseAnswerArgs(["12", "0"]), /start at 1/);
+});
+
+test("parseHandoffArgs: repeated --checklist builds the array", () => {
+  const { id, input } = parseHandoffArgs(["7", "--summary=Done.", "--checklist=Play a round", "--checklist=Menu looks right"]);
+  assert.equal(id, 7);
+  assert.equal(input.summary, "Done.");
+  assert.deepEqual(input.checklist, ["Play a round", "Menu looks right"]);
+});
+
+test("parseHandoffArgs: no --checklist leaves it out", () => {
+  const { id, input } = parseHandoffArgs(["7", "--completed=All of it", "--effort=3"]);
+  assert.equal(id, 7);
+  assert.equal(input.checklist, undefined);
+  assert.equal(input.completed, "All of it");
+  assert.equal(input.estimatedNextEffort, 3);
 });

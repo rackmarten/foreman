@@ -658,6 +658,8 @@ export interface HandoffInput extends Actor {
   next?: string;
   // markdown TL;DR (at most 5 lines, plus a "Needs you:" line).
   summary?: string;
+  // one short, testable line per thing a human has to check by hand.
+  checklist?: string[];
   estimatedNextEffort?: number;
   costUsd?: string;
   durationMs?: number;

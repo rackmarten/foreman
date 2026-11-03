@@ -43,6 +43,8 @@ import {
   repairPromptLines,
   dispatchCapacity,
   summarizeStreamLine,
+  HANDOFF_SCHEMA,
+  handoffInputFields,
   validateRunOptions,
   type TimeoutTrackerState,
 } from "./runner.js";
@@ -1220,4 +1222,20 @@ test("resolveTaskBranch: public slug with a collision suffix, private <id>-<slug
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the handoff schema accepts an optional checklist and handoffInputFields forwards it", () => {
+  assert.deepEqual(HANDOFF_SCHEMA.properties.checklist, { type: "array", items: { type: "string" } });
+  assert.ok(!HANDOFF_SCHEMA.required.includes("checklist"));
+  const input = handoffInputFields({ ...HANDOFF_594, checklist: ["Open the board, the badge is green", "  "] });
+  assert.deepEqual(input.checklist, ["Open the board, the badge is green"]);
+  assert.equal(input.summary, "Adds the thing.");
+  assert.equal(input.completed, HANDOFF_594.completed);
+});
+
+test("handoffInputFields without a checklist still builds a handoff, with no checklist", () => {
+  const input = handoffInputFields(HANDOFF_594);
+  assert.equal(input.checklist, undefined);
+  assert.equal(input.verified, "tests pass");
+  assert.equal(handoffInputFields({ ...HANDOFF_594, checklist: [] }).checklist, undefined);
 });
