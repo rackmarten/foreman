@@ -1250,6 +1250,33 @@ one per repo), each repo the parent has an open PR in is stacked:
 Moving a stacked branch onto the default branch once its parent merges (a
 restack) is not part of this yet.
 
+## Playtest builds (`work playtest`)
+
+`work playtest --project=<slug|id> [--push] [--dry-run]` gives the operator
+one local branch with everything in review merged in, to build and try it
+all at once. Run it inside a clone of that project's repo: it uses git in the
+current directory and nothing else about where the repo lives, so it works
+the same from a Windows clone through the `work` shim.
+
+- It reads the project's tasks in `review` from pinboard and takes each
+  one's newest open PR in this repo (pinboard's `repoSlug`, the basename of
+  the project's `localPath`). A task without one is listed as skipped.
+- It runs `git fetch --prune origin`, creates `playtest/<yyyymmdd>-<n>` (the
+  next `n` not taken locally or on origin) from `origin/<default>` and checks
+  it out.
+- Each PR's head branch is merged with `--no-ff`. A stacked PR's head
+  already contains its parent, so only a stack's leaves are merged: stacks
+  first, then independent PRs, each by task id. A merge that conflicts is
+  aborted and skipped; for a stacked leaf, its parent is tried next.
+- The summary lists every included task (`#id title`, PR URL) with the
+  checklist from its newest handoff that has one, then the skipped tasks
+  and why.
+
+It refuses to run with uncommitted changes. `--dry-run` prints the merge
+plan and the summary without fetching, creating a branch or merging.
+`--push` pushes the branch to origin; by default it stays local. Delete old
+playtest branches by hand (`git branch -D playtest/...`).
+
 ## Housekeeping
 
 A past task, after the disk hit 98% of 32G on 2026-09-28 (docker images,
