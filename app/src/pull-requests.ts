@@ -7,8 +7,14 @@
 // runs from the pipeline loop (every PR_SYNC_INTERVAL_MS) rather
 // than the dispatch loop, and flags a `done` task whose PR GitHub still has
 // open - once per PR, by the comment's own text.
+//
+// After the state sync the same pass restacks stacked PRs whose parent moved
+// or merged (see restack.ts): a parent's new head is only seen here, every
+// PR_SYNC_INTERVAL_MS, while a merge the pipeline does itself restacks at
+// once.
 
 import { execFileSync } from "node:child_process";
+import { restackOpenPrs, type RestackOutcome } from "./restack.js";
 import { addComment, getComments, getTask, listOpenPullRequests, updatePullRequestState, type Actor, type PullRequest } from "./pinboard.js";
 
 export const PR_SYNC_INTERVAL_MS = 10 * 60 * 1000;
@@ -19,6 +25,7 @@ export interface PollPullRequestsResult {
   checked: number;
   updated: number;
   flagged: number;
+  restacked: RestackOutcome[];
 }
 
 export type GhPrState = "open" | "merged" | "closed";
@@ -64,7 +71,10 @@ export function decidePrSync(input: {
   return { patch: null, comment: null };
 }
 
-export async function pollPullRequests(state: (url: string) => GhPrState | null = ghState): Promise<PollPullRequestsResult> {
+export async function pollPullRequests(
+  state: (url: string) => GhPrState | null = ghState,
+  restack: () => Promise<RestackOutcome[]> = () => restackOpenPrs(),
+): Promise<PollPullRequestsResult> {
   const openPrs = await listOpenPullRequests();
   let updated = 0;
   let flagged = 0;
@@ -90,5 +100,12 @@ export async function pollPullRequests(state: (url: string) => GhPrState | null 
       console.error(`pr-sync: ${pr.url} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  return { checked: openPrs.length, updated, flagged };
+  let restacked: RestackOutcome[] = [];
+  try {
+    restacked = await restack();
+  } catch (err) {
+    console.error(`pr-sync: restack failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  for (const r of restacked) if (r.result !== "skipped" && r.result !== "current") console.log(`restack: ${r.prUrl} ${r.result}: ${r.note}`);
+  return { checked: openPrs.length, updated, flagged, restacked };
 }

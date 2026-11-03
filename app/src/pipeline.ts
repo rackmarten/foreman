@@ -41,6 +41,7 @@ import {
   type PullRequest,
   type RepairReason,
 } from "./pinboard.js";
+import { restackOpenPrs } from "./restack.js";
 import { rebaseOntoMain, repoWorkdir, resolveDefaultBranch, withDeployLock } from "./workdir.js";
 
 // paths.ts is the one derivation - a project's localPath is always
@@ -346,6 +347,10 @@ export interface PipelineRepo {
   // handback's resumed run to find it and push its fix onto a branch whose PR
   // is already merged, where nothing would ever land it.
   prId: number;
+  // What pinboard records the PR as targeting. A stacked PR keeps its
+  // parent's branch here until a restack moves it (see restack.ts), even
+  // after GitHub itself retargeted it, so the merge guard reads both.
+  baseBranch?: string | null;
 }
 
 // One task can land changes across several repos (see runner.ts's
@@ -361,7 +366,7 @@ export function pipelineRepos(prs: readonly PullRequest[], branch: string | null
     if (branch !== null && pr.branchName !== branch) continue;
     if (seen.has(pr.repoSlug)) continue;
     seen.add(pr.repoSlug);
-    repos.push({ repoSlug: pr.repoSlug, prUrl: pr.url, prId: pr.id });
+    repos.push({ repoSlug: pr.repoSlug, prUrl: pr.url, prId: pr.id, ...(pr.baseBranch ? { baseBranch: pr.baseBranch } : {}) });
   }
   return repos;
 }
@@ -1208,14 +1213,46 @@ function publicPrTitle(prUrl: string, fallbackLocalPath: string | null): string 
   return view.ok && view.stdout.trim() ? view.stdout.trim() : null;
 }
 
+// A backstop for pinboard's approve guard: a PR whose base is not the
+// default branch is stacked on a parent that has not merged, and merging it
+// would land the parent's unreviewed work through the child. Unreadable is
+// "not yet" (retried next poll), a real mismatch parks. `recordedBase` is
+// pinboard's: GitHub retargets a child the moment its parent's branch is
+// deleted, so a child whose restack has not landed yet (it still carries
+// the parent's pre-squash commits) only shows up there.
+export function checkMergeBase(prUrl: string, org: string, repoSlug: string, exec: Exec = run, recordedBase: string | null = null): StageOutcome | null {
+  const base = exec("gh", ["pr", "view", prUrl, "--json", "baseRefName", "--jq", ".baseRefName"]);
+  const repo = exec("gh", ["repo", "view", `${org}/${repoSlug}`, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+  const baseName = base.ok ? base.stdout.trim() : "";
+  const defaultName = repo.ok ? repo.stdout.trim() : "";
+  if (!baseName || !defaultName) return { moved: null, note: `could not read ${prUrl}'s base or ${repoSlug}'s default branch, retrying` };
+  if (baseName === defaultName && (!recordedBase || recordedBase === defaultName)) return null;
+  if (baseName === defaultName) {
+    return park(
+      `${repoSlug} PR not restacked onto ${defaultName} yet`,
+      `Not merging ${prUrl}: its parent (\`${recordedBase}\`) merged, but this PR has not been restacked onto \`${defaultName}\` yet, so it still carries the parent's commits. Rebase it onto \`${defaultName}\` keeping only its own commits, then approve it again.`,
+    );
+  }
+  return park(
+    `${repoSlug} PR targets ${baseName}, not ${defaultName}`,
+    `Not merging ${prUrl}: it targets \`${baseName}\`, not the default branch \`${defaultName}\`, so it is still stacked on an unmerged parent. Merge the parent first; the restack then moves this PR onto \`${defaultName}\`.`,
+  );
+}
+
 async function handleAwaitingMerge(entry: PipelineTask, repos: PipelineRepo[], now: number): Promise<StageOutcome> {
   const merged: string[] = [];
   const elapsed = stageElapsedMs(entry.stageEnteredAt, now);
-  for (const repo of repos) {
+  // Every repo's base is checked before any merges, so a task across
+  // several repos is never left half merged by the guard.
+  const unmerged = repos.filter((repo) => !prIsMerged(repo.prUrl));
+  for (const repo of unmerged) {
+    const guard = checkMergeBase(repo.prUrl, orgForPr(repo.prUrl, entry.localPath), repo.repoSlug, run, repo.baseBranch ?? null);
+    if (guard) return guard;
+  }
+  for (const repo of unmerged) {
     // Idempotent on a re-run: a poller restart between the merge and the
     // transition would otherwise try to merge an already-merged PR and read
-    // gh's refusal as a conflict.
-    if (prIsMerged(repo.prUrl)) continue;
+    // gh's refusal as a conflict (the filter above).
     const result = run("gh", squashMergeArgs(repo.prUrl, publicPrTitle(repo.prUrl, entry.localPath)));
     if (!result.ok) {
       // the common cause is this branch having fallen behind main
@@ -1257,6 +1294,16 @@ async function handleAwaitingMerge(entry: PipelineTask, repos: PipelineRepo[], n
     await withRetry(() => updatePullRequestState(entry.taskId, repo.prId, "merged")).catch((err) =>
       console.error(`pipeline: could not mark ${repo.prUrl} merged in pinboard: ${err instanceof Error ? err.message : String(err)}`),
     );
+  }
+
+  // PRs stacked on this one move onto the default branch now rather than at
+  // the next PR sync, so they never sit on a deleted base.
+  if (merged.length > 0) {
+    await restackOpenPrs()
+      .then((outcomes) => {
+        for (const r of outcomes) if (r.result !== "skipped") console.log(`restack: ${r.prUrl} ${r.result}: ${r.note}`);
+      })
+      .catch((err) => console.error(`pipeline: restack after merging task ${entry.taskId} failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   refreshForDeploy(repos);
