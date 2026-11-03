@@ -59,8 +59,16 @@ export interface Task {
   // by any human requeue - see runner.ts's repairPromptLines.
   repairReason: RepairReason | null;
   repairContext: string | null;
+  // The parent task whose unmerged PR this task builds on (see "Stacked
+  // branches" in the README). Optional so an older pinboard parses.
+  stackOn?: StackOn | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StackOn {
+  taskId: number;
+  pullRequests: { url: string; repoSlug: string; branchName: string | null }[];
 }
 
 export interface TaskDetail extends Task {
@@ -579,7 +587,15 @@ export function recordActivity(taskId: number, actor: Actor, payload: Record<str
 
 export function addPullRequest(
   taskId: number,
-  input: { url: string; repoSlug: string; branchName?: string; attemptNumber?: number },
+  input: {
+    url: string;
+    repoSlug: string;
+    branchName?: string;
+    attemptNumber?: number;
+    baseBranch?: string;
+    stackedOnTaskId?: number | null;
+    stackedOnSha?: string | null;
+  },
 ): Promise<PullRequest> {
   return post(`/tasks/${taskId}/pull-requests`, input);
 }

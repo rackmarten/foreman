@@ -9,6 +9,10 @@ import {
   PR_PINBOARD_RETRY,
   GH_PR_CREATE_RETRY_DELAYS_MS,
   createPrWithRetry,
+  prCreateArgs,
+  stackParentFor,
+  stackPromptLines,
+  withStackNote,
   isTransientGhError,
   advanceTimeoutTracker,
   askHistoryLines,
@@ -1238,4 +1242,35 @@ test("handoffInputFields without a checklist still builds a handoff, with no che
   assert.equal(input.checklist, undefined);
   assert.equal(input.verified, "tests pass");
   assert.equal(handoffInputFields({ ...HANDOFF_594, checklist: [] }).checklist, undefined);
+});
+
+const STACKED = {
+  stackOn: {
+    taskId: 5,
+    pullRequests: [
+      { url: "https://github.com/o/pinboard/pull/3", repoSlug: "pinboard", branchName: "parent-pinboard" },
+      { url: "https://github.com/o/foreman/pull/4", repoSlug: "foreman", branchName: "parent-foreman" },
+    ],
+  },
+};
+
+test("stackParentFor picks the parent PR in the same repo, and nothing for an unstacked task", () => {
+  assert.deepEqual(stackParentFor(STACKED, "foreman"), { taskId: 5, branch: "parent-foreman", prUrl: "https://github.com/o/foreman/pull/4" });
+  assert.equal(stackParentFor(STACKED, "other"), null);
+  assert.equal(stackParentFor({ stackOn: null }, "foreman"), null);
+  assert.equal(stackParentFor({}, "foreman"), null);
+});
+
+test("a stacked PR targets the parent branch and opens by pointing at the parent PR", () => {
+  const args = prCreateArgs("t", "b", "child", "parent-foreman");
+  assert.equal(args[args.indexOf("--base") + 1], "parent-foreman");
+  assert.equal(withStackNote("body", "https://github.com/o/foreman/pull/4"), "Stacked on https://github.com/o/foreman/pull/4, merge that first.\n\nbody");
+  assert.equal(withStackNote("body", null), "body");
+});
+
+test("stackPromptLines tells a stacked session which PR it builds on, and is empty otherwise", () => {
+  const text = stackPromptLines(STACKED).join("\n");
+  assert.ok(text.includes(`stacked on task ${STACKED.stackOn.taskId}`));
+  assert.match(text, /pull\/4/);
+  assert.deepEqual(stackPromptLines({ stackOn: null }), []);
 });

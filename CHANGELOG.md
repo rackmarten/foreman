@@ -29,6 +29,11 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   falls back to the usual `deploy_failed` handback.
 - `FOREMAN_CI_TIMEOUT_MINUTES` sets how long the pipeline waits for a PR's
   CI run.
+- Stacked branches: a task whose pinboard payload has `stackOn` cuts its
+  branch from the parent task's open PR branch, rebases onto that branch
+  before pushing, and opens its PR against it with a "Stacked on" note. The
+  PR row sent to pinboard records `baseBranch`, `stackedOnTaskId` and
+  `stackedOnSha`. See "Stacked branches" in the README.
 
 ### Changed
 - Task branches no longer carry the task id when a task touches a public

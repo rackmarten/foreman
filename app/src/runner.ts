@@ -72,13 +72,16 @@ import {
   chooseTaskBranch,
   currentBranch,
   rebaseOntoMain,
+  readStackRecord,
   remoteBranchExists,
   removeTaskWorkdir,
   repoWorkdir,
-  resolveDefaultBranch,
+  resolveBaseBranch,
   taskBranch,
   taskWorkdir,
   taskWorkdirBranch,
+  type StackParent,
+  type StackRecord,
 } from "./workdir.js";
 import { classifyAttemptFailure } from "./session-limit.js";
 import {
@@ -661,6 +664,7 @@ async function buildPrompt(task: Task, project: Project, allProjects: Project[])
     ...commentLines,
     ...subtaskLines,
     ...relatedRepoLinesResult,
+    ...stackPromptLines(task),
     ...publicRepoRulesLines(publicReposInRun(task, project, allProjects)),
     ...rootLines,
     ...askLines,
@@ -756,16 +760,50 @@ export function ensureWorkspaceTrusted(repoPath: string, configPath: string = CL
 // workdir, all on the same branch name, so pushAndOpenPr/mergeAndDeploy can
 // treat them uniformly once the session is done. Idempotent per repo, so a
 // resumed attempt keeps the clones (and their commits) it already has.
-function ensureTaskClones(taskId: number, targets: RepoTarget[], branch: string, root: string = TASK_ROOT): void {
+function ensureTaskClones(
+  taskId: number,
+  targets: RepoTarget[],
+  branch: string,
+  root: string = TASK_ROOT,
+  task?: Pick<Task, "stackOn">,
+): void {
   for (const target of targets) {
+    const repoSlug = basename(target.project.localPath as string);
     ensureTaskClone({
       taskId,
-      repoSlug: basename(target.project.localPath as string),
+      repoSlug,
       sourceRepo: target.sourceRepo,
       branch,
       root,
+      stackOn: task ? stackParentFor(task, repoSlug) : null,
     });
   }
+}
+
+// The parent PR one repo of a stacked task builds on: the parent's open PR
+// in that same repo. A repo the parent has no PR in is not stacked.
+export function stackParentFor(task: Pick<Task, "stackOn">, repoSlug: string): StackParent | null {
+  const pr = task.stackOn?.pullRequests.find((p) => p.repoSlug === repoSlug && p.branchName);
+  if (!task.stackOn || !pr?.branchName) return null;
+  return { taskId: task.stackOn.taskId, branch: pr.branchName, prUrl: pr.url };
+}
+
+// Tells a stacked task's session that its checkout already carries the
+// parent's unmerged work, so it builds on that instead of redoing it.
+export function stackPromptLines(task: Pick<Task, "stackOn">): string[] {
+  const prs = task.stackOn?.pullRequests.filter((p) => p.branchName) ?? [];
+  if (!task.stackOn || !prs.length) return [];
+  return [
+    "",
+    `This task is stacked on task ${task.stackOn.taskId}, which is not merged yet: ${prs.map((p) => p.url).join(", ")}. ` +
+      "Your branch is cut from that PR's branch, so its changes are already in your checkout. Build on them " +
+      "rather than redoing or reverting them; your own PR targets that branch and shows only your commits.",
+  ];
+}
+
+// The first line of a stacked PR's body, pointing at the PR it depends on.
+export function withStackNote(body: string, parentPrUrl: string | null): string {
+  return parentPrUrl ? `Stacked on ${parentPrUrl}, merge that first.\n\n${body}` : body;
 }
 
 // SIGKILL terminates the process, but its file descriptors (the workdir's
@@ -947,7 +985,7 @@ export function summarizeStreamLine(line: Record<string, unknown>): StreamActivi
 // actually current.
 function branchHasCommits(repoPath: string, branch: string): boolean {
   try {
-    const defaultBranch = resolveDefaultBranch(repoPath);
+    const defaultBranch = resolveBaseBranch(repoPath);
     const base = execFileSync("git", ["merge-base", `origin/${defaultBranch}`, branch], { cwd: repoPath }).toString().trim();
     const head = execFileSync("git", ["rev-parse", branch], { cwd: repoPath }).toString().trim();
     return base !== head;
@@ -1012,7 +1050,7 @@ async function runOneAttempt(
       branch = await resolveTaskBranch(task, targets);
       cleanupWorkdir(task.id);
     }
-    ensureTaskClones(task.id, targets, branch);
+    ensureTaskClones(task.id, targets, branch, TASK_ROOT, task);
     recordWorkspaceRoot(task.id);
     for (const path of repoPaths) ensureWorkspaceTrusted(path);
   } catch (err) {
@@ -1555,6 +1593,12 @@ export async function createPrWithRetry(deps: {
   }
 }
 
+// `base` is the default branch, or a stacked branch's parent branch (see
+// workdir.ts's resolveBaseBranch).
+export function prCreateArgs(title: string, body: string, branch: string, base: string): string[] {
+  return ["pr", "create", "--title", title, "--body", body, "--head", branch, "--base", base];
+}
+
 function findOpenPrUrl(repoPath: string, branch: string, base: string): string | null {
   try {
     const out = execFileSync(
@@ -1575,13 +1619,17 @@ async function pushAndOpenPr(
   project: Project,
   handoff: HandoffFields,
   needsForce: boolean,
-): Promise<{ url: string; isNew: boolean; pushed: boolean }> {
+): Promise<{ url: string; isNew: boolean; pushed: boolean; base: string; stack: StackRecord | null }> {
   // title and body are built before the push so a public repo's
-  // leak gate can check them along with the commits and diff.
-  const base = resolveDefaultBranch(repoPath);
+  // leak gate can check them along with the commits and diff. A stacked
+  // branch's base is its parent's branch, so the diff, title and leak gate
+  // cover only this task's own commits.
+  const base = resolveBaseBranch(repoPath);
+  const recorded = readStackRecord(repoPath);
+  const stack = recorded && recorded.branch === base ? recorded : null;
   const isPublic = isPublicRepo(project.localPath);
   const title = formatPrTitle(task, isPublic, isPublic ? firstCommitSubject(repoPath, base) : null);
-  const body = formatPrBody(task, project, handoff, changedFiles(repoPath, base, branch), isPublic);
+  const body = withStackNote(formatPrBody(task, project, handoff, changedFiles(repoPath, base, branch), isPublic), stack?.prUrl || null);
   const before = remoteBranchSha(repoPath, branch);
   const gate = leakGateForPush(repoPath, base, isPublic, title, body, { branchName: before === null ? branch : null });
   if (gate.blocked) throw new LeakBlockedError(basename(project.localPath as string), gate);
@@ -1597,20 +1645,20 @@ async function pushAndOpenPr(
   // on this branch still gets one created below, which is every other case.
   const pushed = remoteBranchSha(repoPath, branch) !== before;
   const existing = findExistingPr(await withPinboardRetry(() => listPullRequests(task.id)), branch, basename(project.localPath as string));
-  if (existing) return { url: existing.url, isNew: false, pushed };
+  if (existing) return { url: existing.url, isNew: false, pushed, base, stack };
 
   const url = await createPrWithRetry({
     create: () =>
       execFileSync(
         "gh",
-        ["pr", "create", "--title", title, "--body", body, "--head", branch, "--base", base],
+        prCreateArgs(title, body, branch, base),
         { cwd: repoPath },
       )
         .toString()
         .trim(),
     findOpen: () => findOpenPrUrl(repoPath, branch, base),
   });
-  return { url, isNew: true, pushed };
+  return { url, isNew: true, pushed, base, stack };
 }
 
 // submitHandoff (below) writes the structured handoff to its own table, which
@@ -2241,6 +2289,9 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
               repoSlug: basename(target.project.localPath as string),
               branchName: outcome.branch,
               attemptNumber: task.attemptCount,
+              baseBranch: pr.base,
+              stackedOnTaskId: pr.stack?.taskId ?? null,
+              stackedOnSha: pr.stack?.sha || null,
             }),
           );
         } else if (pr.pushed) {

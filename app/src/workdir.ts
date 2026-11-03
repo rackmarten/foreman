@@ -245,6 +245,58 @@ export interface CloneOptions {
   sourceRepo: string;
   branch: string;
   root?: string;
+  // The parent task's unmerged PR branch to cut a new branch from (see
+  // "Stacked branches" in the README). Ignored when the task's own branch
+  // already exists on the remote.
+  stackOn?: StackParent | null;
+}
+
+export interface StackParent {
+  taskId: number;
+  branch: string;
+  prUrl: string;
+}
+
+// What a stacked clone was cut from, kept in the clone's own git config so
+// every later step (the pre-push rebase, the PR's base, the pipeline's
+// merge-conflict rebase) reads the same answer without it being plumbed
+// through. `sha` is the parent branch's tip at cut time, the old base a
+// later restack needs.
+export interface StackRecord extends StackParent {
+  sha: string;
+}
+
+const STACK_CONFIG_KEYS = { taskId: "foreman.stackTaskId", branch: "foreman.stackBranch", prUrl: "foreman.stackPrUrl", sha: "foreman.stackSha" } as const;
+
+function recordStack(repoPath: string, stack: StackRecord): void {
+  for (const [field, key] of Object.entries(STACK_CONFIG_KEYS)) {
+    execFileSync("git", ["config", key, String(stack[field as keyof StackRecord])], { cwd: repoPath, stdio: "pipe" });
+  }
+}
+
+export function readStackRecord(repoPath: string): StackRecord | null {
+  const get = (key: string): string | null => {
+    try {
+      return execFileSync("git", ["config", "--get", key], { cwd: repoPath, stdio: "pipe" }).toString().trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const branch = get(STACK_CONFIG_KEYS.branch);
+  const taskId = Number(get(STACK_CONFIG_KEYS.taskId));
+  if (!branch || !Number.isInteger(taskId) || taskId <= 0) return null;
+  return { taskId, branch, prUrl: get(STACK_CONFIG_KEYS.prUrl) ?? "", sha: get(STACK_CONFIG_KEYS.sha) ?? "" };
+}
+
+// The branch this clone's work is measured against and its PR targets: the
+// parent's branch for a stacked clone while that branch still exists on the
+// remote, otherwise the default branch. A parent branch that is gone (merged
+// with --delete-branch) falls back to the default branch, which is where
+// GitHub retargets the PR too.
+export function resolveBaseBranch(repoPath: string): string {
+  const stack = readStackRecord(repoPath);
+  if (stack && remoteBranchExists(repoPath, stack.branch)) return stack.branch;
+  return resolveDefaultBranch(repoPath);
 }
 
 // Not every project's default branch is named `main` - my-moments (and
@@ -332,11 +384,35 @@ export function ensureTaskClone(opts: CloneOptions): string {
   // later `push --force-with-lease` would quietly overwrite the PR with a
   // branch that no longer contains its work. Check out the remote branch
   // instead when there is one.
-  const base = remote && remoteBranchExists(dest, opts.branch) ? `origin/${opts.branch}` : `origin/${defaultBranch}`;
-  if (base !== `origin/${defaultBranch}`) execFileSync("git", ["fetch", "origin", opts.branch], { cwd: dest, stdio: "pipe" });
+  const ownBranchExists = remote !== null && remoteBranchExists(dest, opts.branch);
+  let base = ownBranchExists ? `origin/${opts.branch}` : `origin/${defaultBranch}`;
+  if (ownBranchExists) execFileSync("git", ["fetch", "origin", opts.branch], { cwd: dest, stdio: "pipe" });
+  // A stacked task builds on its parent's unmerged PR, so a new branch is cut
+  // from that PR's branch. An existing remote branch still wins (above), and
+  // its stack is recorded from where it forked off the parent. A parent
+  // branch that can't be fetched (merged and deleted meanwhile) leaves the
+  // clone unstacked, cut from the default branch.
+  const stack = remote && opts.stackOn ? fetchStackParent(dest, opts.stackOn, ownBranchExists ? base : null) : null;
+  if (stack && !ownBranchExists) base = `origin/${stack.branch}`;
   execFileSync("git", ["checkout", "-b", opts.branch, base], { cwd: dest, stdio: "pipe" });
+  if (stack) recordStack(dest, stack);
   seedNodeModules(opts.sourceRepo, dest);
   return dest;
+}
+
+// `forkedFrom`, when given, is an existing branch whose fork point off the
+// parent is the recorded sha rather than the parent's current tip.
+function fetchStackParent(repoPath: string, parent: StackParent, forkedFrom: string | null): StackRecord | null {
+  try {
+    execFileSync("git", ["fetch", "origin", parent.branch], { cwd: repoPath, stdio: "pipe" });
+    const ref = `origin/${parent.branch}`;
+    const sha = execFileSync("git", forkedFrom ? ["merge-base", ref, forkedFrom] : ["rev-parse", ref], { cwd: repoPath, stdio: "pipe" })
+      .toString()
+      .trim();
+    return { ...parent, sha };
+  } catch {
+    return null;
+  }
 }
 
 // Whether `origin` already has this branch. Any git failure reads as "no
@@ -403,9 +479,12 @@ function refreshRemoteBranch(repoPath: string, branch: string): void {
 // same rebase to clear a merge conflict without spending an agent run, and
 // importing runner.ts (the dispatcher, the claude spawn, the whole attempt
 // loop) into the poller for one git helper would be the wrong direction.
+//
+// A stacked clone (see readStackRecord) rebases onto its parent's branch
+// instead, while that branch still exists.
 export function rebaseOntoMain(path: string, branch?: string): { ok: true } | { ok: false; error: string } {
   try {
-    const defaultBranch = resolveDefaultBranch(path);
+    const defaultBranch = resolveBaseBranch(path);
     execFileSync("git", ["fetch", "origin", defaultBranch], { cwd: path, stdio: "pipe" });
     if (branch) refreshRemoteBranch(path, branch);
     // --empty=drop: the pipeline squash-merges (gh pr merge --squash), which
