@@ -274,6 +274,23 @@ function recordStack(repoPath: string, stack: StackRecord): void {
   }
 }
 
+// After a restack (see restack.ts): the parent moved, so the clone's
+// recorded base moves with it; or the parent merged, so the clone is no
+// longer stacked and measures against the default branch again.
+export function updateStackSha(repoPath: string, sha: string): void {
+  if (readStackRecord(repoPath)) execFileSync("git", ["config", STACK_CONFIG_KEYS.sha, sha], { cwd: repoPath, stdio: "pipe" });
+}
+
+export function clearStackRecord(repoPath: string): void {
+  for (const key of Object.values(STACK_CONFIG_KEYS)) {
+    try {
+      execFileSync("git", ["config", "--unset", key], { cwd: repoPath, stdio: "pipe" });
+    } catch {
+      // not set - fine
+    }
+  }
+}
+
 export function readStackRecord(repoPath: string): StackRecord | null {
   const get = (key: string): string | null => {
     try {

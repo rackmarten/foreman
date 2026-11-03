@@ -40,6 +40,13 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   before pushing, and opens its PR against it with a "Stacked on" note. The
   PR row sent to pinboard records `baseBranch`, `stackedOnTaskId` and
   `stackedOnSha`. See "Stacked branches" in the README.
+- Stacked PRs are restacked as their parents change: after the pipeline
+  merges a parent, its children are retargeted to the default branch and
+  rebased onto it with only their own commits; when a parent's branch gets a
+  new head, the next PR sync rebases its children onto it, chains in order.
+  A conflicting restack leaves the remote branch alone and moves the child to
+  `rework` with a comment naming the parent commit.
+- The pipeline never merges a PR whose base is not the default branch.
 
 ### Changed
 - Task branches no longer carry the task id when a task touches a public

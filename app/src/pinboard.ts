@@ -142,6 +142,12 @@ export interface PullRequest {
   branchName: string | null;
   state: "open" | "merged" | "closed";
   attemptNumber: number | null;
+  // Stacking (see "Stacked branches" in the README): the branch the PR
+  // targets, and for a stacked PR the parent task and the parent commit it
+  // currently sits on. Optional so an older pinboard parses.
+  baseBranch?: string | null;
+  stackedOnTaskId?: number | null;
+  stackedOnSha?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -624,6 +630,16 @@ export function updatePullRequestState(
   state: "open" | "merged" | "closed",
 ): Promise<{ status: number; data: PullRequest }> {
   return patch(`/tasks/${taskId}/pull-requests/${prId}`, { state });
+}
+
+// a restack moved a stacked PR onto a new base (its parent's new head, or
+// the default branch once the parent merged).
+export function updatePullRequestStack(
+  taskId: number,
+  prId: number,
+  stack: { baseBranch: string; stackedOnSha: string },
+): Promise<{ status: number; data: PullRequest }> {
+  return patch(`/tasks/${taskId}/pull-requests/${prId}`, stack);
 }
 
 // A past task: the post-PR pipeline. pinboard

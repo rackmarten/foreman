@@ -1247,8 +1247,52 @@ one per repo), each repo the parent has an open PR in is stacked:
 - **The agent is told.** The prompt names the parent task and its PR, and
   says to build on that work rather than redo it.
 
-Moving a stacked branch onto the default branch once its parent merges (a
-restack) is not part of this yet.
+#### Merge, restack and conflicts
+
+A stacked PR's row also records the parent commit it sits on
+(`stackedOnSha`). Whenever that parent moves, the child is restacked: only
+its own commits (those after the recorded sha) are replayed onto the new
+base, so its diff never picks up the parent's work twice. This lives in
+`app/src/restack.ts`.
+
+- **Parent merged.** After the pipeline squash-merges a PR
+  (`gh pr merge --squash --delete-branch`), it restacks every open PR stacked
+  on it straight away: it checks GitHub retargeted the child to the default
+  branch (`gh pr edit --base` if not), runs
+  `git rebase --onto origin/<default> <recorded parent sha>`, pushes with
+  `--force-with-lease` against the head it rebased, and records the default
+  branch and its head as the PR's new base. From then on it is an ordinary
+  PR. A parent merged by hand on GitHub is picked up by the next PR sync.
+- **Parent moved.** The PR sync (every 10 minutes, in the pipeline service)
+  compares each stacked PR's recorded sha with its parent branch's head. A
+  new head (an agent rework, a commit pushed from an interactive session)
+  restacks the child with `git rebase --onto origin/<parent> <old sha>` and
+  records the new sha. A child already on top of the new head (a resumed run
+  rebased it itself) only gets its record updated.
+- **Chains** (A <- B <- C) are handled parents first in one pass: restacking
+  B gives it a new head, which C then sees as a moved parent.
+- **Conflicts.** A rebase that conflicts is aborted before anything is
+  pushed, so the remote branch is untouched, and the child moves to `rework`
+  with a comment naming the parent commit it could not rebase onto. A child
+  whose recorded parent commit is no longer in its branch (the parent was
+  force-pushed, or the child rebased by hand) goes the same way, since no
+  later pass would get any further.
+- **Which children.** Only a child in `review`, `awaiting_review`,
+  `awaiting_ci` or `awaiting_merge` is restacked. A running session owns its
+  branch (and rebases onto its base before pushing anyway), and a child in
+  `rework` or waiting on a question is left to whoever has it. The rebase
+  runs in the child's own task clone when it is still on disk (its
+  `foreman.stack*` record is updated, or cleared once the parent merged),
+  otherwise in a throwaway clone of the workspace checkout. A rejected
+  parent is pinboard's to handle: it sends the children back to `rework`.
+- **Merge guard.** The pipeline never merges a PR whose base on GitHub is not
+  the repo's default branch. pinboard's approve guard already refuses to
+  approve a child before its parent merged; if one reaches `awaiting_merge`
+  anyway, it parks in `rework` with a comment instead of landing the
+  parent's unreviewed work through the child. It also reads pinboard's
+  recorded base, because GitHub retargets a child the moment its parent's
+  branch is deleted: a child whose restack has not landed (it still carries
+  the parent's pre-squash commits) is parked too.
 
 ## Playtest builds (`work playtest`)
 
