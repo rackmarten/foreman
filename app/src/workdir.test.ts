@@ -736,7 +736,10 @@ test("rebaseOntoMain rebases a stacked branch onto the parent's branch, not main
 
   writeFileSync(join(dest, "child.txt"), "child\n");
   git(["add", "."], dest);
-  git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "child file"], dest);
+  // the rebase itself commits, so the clone needs an identity (CI has no global one)
+  git(["config", "user.email", "test@example.com"], dest);
+  git(["config", "user.name", "test"], dest);
+  git(["commit", "-qm", "child file"], dest);
   assert.deepEqual(rebaseOntoMain(dest, "child"), { ok: true });
   assert.equal(git(["rev-parse", "HEAD~1"], dest).trim(), parentTip);
   assert.ok(!existsSync(join(dest, "main2.txt")), "main's newer commits stay out of a stacked branch");
