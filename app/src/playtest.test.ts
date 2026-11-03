@@ -53,13 +53,10 @@ function fixture(): { root: string; clone: string } {
 
 const project = { id: 1, slug: "game", localPath: "org/game" } as Project;
 
-function task(id: number, stackOn?: number): Task {
-  return {
-    id,
-    title: `title ${id}`,
-    status: "review",
-    stackOn: stackOn ? { taskId: stackOn, pullRequests: [] } : null,
-  } as unknown as Task;
+// like pinboard's task list, which carries no stackOn: only GET /tasks/:id
+// computes it, so the parent comes from the PR row's stackedOnTaskId.
+function task(id: number): Task {
+  return { id, title: `title ${id}`, status: "review" } as unknown as Task;
 }
 
 function deps(): PlaytestDeps {
@@ -70,8 +67,9 @@ function deps(): PlaytestDeps {
     21: "stack-child",
     30: "feat-a-conflict",
   };
+  const stackedOn: Record<number, number> = { 21: 20 };
   return {
-    listTasks: async () => [task(30), task(21, 20), task(11), task(10), task(20), task(40)],
+    listTasks: async () => [task(30), task(21), task(11), task(10), task(20), task(40)],
     listPullRequests: async (taskId) =>
       branches[taskId]
         ? [
@@ -82,6 +80,7 @@ function deps(): PlaytestDeps {
               repoSlug: "game",
               branchName: branches[taskId],
               state: "open",
+              stackedOnTaskId: stackedOn[taskId] ?? null,
             } as PullRequest,
           ]
         : [],
