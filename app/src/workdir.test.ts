@@ -19,9 +19,11 @@ import {
   packageDirs,
   parseTaskWorkdirName,
   pruneTrustedWorkdirs,
+  readStackRecord,
   rebaseOntoMain,
   removeTaskWorkdir,
   repoWorkdir,
+  resolveBaseBranch,
   resolveDefaultBranch,
   seedNodeModules,
   shouldSeedNodeModules,
@@ -632,4 +634,114 @@ test("a later attempt reads the branch back from the clone instead of the title"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Stacked branches: a remote with main and a parent task's unmerged PR
+// branch, and a workspace checkout of it on main.
+function stackedFixture(): { root: string; source: string; tasks: string; parentTip: string; git: (args: string[], cwd: string) => string } {
+  const root = scratch();
+  const remote = join(root, "remote.git");
+  const source = join(root, "source");
+  const tasks = join(root, "tasks");
+  const git = (args: string[], cwd: string): string => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
+  mkdirSync(remote, { recursive: true });
+  git(["init", "-q", "--bare", "-b", "main", "."], remote);
+  mkdirSync(source, { recursive: true });
+  git(["init", "-q", "-b", "main", "."], source);
+  git(["config", "user.email", "test@example.com"], source);
+  git(["config", "user.name", "test"], source);
+  git(["remote", "add", "origin", remote], source);
+  writeFileSync(join(source, "README.md"), "# source\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "initial"], source);
+  git(["push", "-q", "-u", "origin", "main"], source);
+  git(["checkout", "-qb", "parent-work"], source);
+  writeFileSync(join(source, "parent.txt"), "parent\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "parent work"], source);
+  git(["push", "-q", "-u", "origin", "parent-work"], source);
+  const parentTip = git(["rev-parse", "HEAD"], source).trim();
+  git(["checkout", "-q", "main"], source);
+  return { root, source, tasks, parentTip, git };
+}
+
+const PARENT = { taskId: 5, branch: "parent-work", prUrl: "https://github.com/o/source/pull/1" };
+
+test("ensureTaskClone cuts a stacked task's branch from the parent's branch and records the stack", () => {
+  const { root, source, tasks, parentTip, git } = stackedFixture();
+  const dest = ensureTaskClone({ taskId: 6, repoSlug: "source", sourceRepo: source, branch: "child", root: tasks, stackOn: PARENT });
+  assert.equal(git(["rev-parse", "HEAD"], dest).trim(), parentTip);
+  assert.ok(existsSync(join(dest, "parent.txt")), "the parent's unmerged work should be in the checkout");
+  assert.deepEqual(readStackRecord(dest), { ...PARENT, sha: parentTip });
+  assert.equal(resolveBaseBranch(dest), "parent-work");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ensureTaskClone without a stack is unchanged: cut from main, no stack recorded", () => {
+  const { root, source, tasks, git } = stackedFixture();
+  const dest = ensureTaskClone({ taskId: 7, repoSlug: "source", sourceRepo: source, branch: "plain", root: tasks });
+  assert.equal(git(["rev-parse", "HEAD"], dest).trim(), git(["rev-parse", "main"], source).trim());
+  assert.equal(readStackRecord(dest), null);
+  assert.equal(resolveBaseBranch(dest), "main");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ensureTaskClone falls back to main when the parent's branch is gone", () => {
+  const { root, source, tasks, git } = stackedFixture();
+  git(["push", "-q", "origin", "--delete", "parent-work"], source);
+  const dest = ensureTaskClone({ taskId: 8, repoSlug: "source", sourceRepo: source, branch: "orphan", root: tasks, stackOn: PARENT });
+  assert.equal(git(["rev-parse", "HEAD"], dest).trim(), git(["rev-parse", "main"], source).trim());
+  assert.equal(readStackRecord(dest), null);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ensureTaskClone keeps an existing remote branch for a stacked task and records where it forked", () => {
+  const { root, source, tasks, parentTip, git } = stackedFixture();
+  git(["checkout", "-qb", "child", "parent-work"], source);
+  writeFileSync(join(source, "child.txt"), "child\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "child work"], source);
+  git(["push", "-q", "-u", "origin", "child"], source);
+  const childTip = git(["rev-parse", "HEAD"], source).trim();
+  git(["checkout", "-q", "main"], source);
+  // the parent moves on after the child was cut
+  git(["checkout", "-q", "parent-work"], source);
+  writeFileSync(join(source, "parent2.txt"), "more\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "parent more"], source);
+  git(["push", "-q", "origin", "parent-work"], source);
+  git(["checkout", "-q", "main"], source);
+
+  const dest = ensureTaskClone({ taskId: 9, repoSlug: "source", sourceRepo: source, branch: "child", root: tasks, stackOn: PARENT });
+  assert.equal(git(["rev-parse", "HEAD"], dest).trim(), childTip);
+  assert.equal(readStackRecord(dest)?.sha, parentTip);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("rebaseOntoMain rebases a stacked branch onto the parent's branch, not main", () => {
+  const { root, source, tasks, git } = stackedFixture();
+  const dest = ensureTaskClone({ taskId: 10, repoSlug: "source", sourceRepo: source, branch: "child", root: tasks, stackOn: PARENT });
+  // the parent's branch and main both move
+  git(["checkout", "-q", "parent-work"], source);
+  writeFileSync(join(source, "parent2.txt"), "more\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "parent more"], source);
+  git(["push", "-q", "origin", "parent-work"], source);
+  const parentTip = git(["rev-parse", "HEAD"], source).trim();
+  git(["checkout", "-q", "main"], source);
+  writeFileSync(join(source, "main2.txt"), "main\n");
+  git(["add", "."], source);
+  git(["commit", "-qm", "main more"], source);
+  git(["push", "-q", "origin", "main"], source);
+
+  writeFileSync(join(dest, "child.txt"), "child\n");
+  git(["add", "."], dest);
+  // the rebase itself commits, so the clone needs an identity (CI has no global one)
+  git(["config", "user.email", "test@example.com"], dest);
+  git(["config", "user.name", "test"], dest);
+  git(["commit", "-qm", "child file"], dest);
+  assert.deepEqual(rebaseOntoMain(dest, "child"), { ok: true });
+  assert.equal(git(["rev-parse", "HEAD~1"], dest).trim(), parentTip);
+  assert.ok(!existsSync(join(dest, "main2.txt")), "main's newer commits stay out of a stacked branch");
+  rmSync(root, { recursive: true, force: true });
 });

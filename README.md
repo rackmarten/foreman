@@ -1219,6 +1219,37 @@ Worktrees created before a past task are no longer touched by anything; run
 `scripts/sweep-orphaned-worktrees.sh --apply` once to clear the ones whose
 tasks are finished.
 
+### Stacked branches
+
+A task can build on another task's work before that work is merged. When
+pinboard's task payload carries `stackOn` (the parent task and its open PRs,
+one per repo), each repo the parent has an open PR in is stacked:
+
+- **Cut from the parent's branch.** A new branch is cut from
+  `origin/<parent branch>` instead of the default branch, so the parent's
+  unmerged changes are already in the checkout. A branch that already exists
+  on the remote still wins, as for any other task. If the parent's branch is
+  gone (merged and deleted meanwhile), the clone is cut from the default
+  branch like an unstacked one.
+- **Recorded in the clone.** What the clone stacked on (parent task id,
+  branch, PR URL and the parent's tip at cut time) is kept in the clone's
+  own git config (`foreman.stack*`), so the steps below read the same answer.
+  For a branch that already existed, the recorded sha is where it forked off
+  the parent.
+- **Base everywhere is the parent branch** while it still exists on the
+  remote: the pre-push rebase (`rebaseOntoMain`), the pipeline's
+  merge-conflict rebase, the "has commits" check, the PR's title, file list
+  and leak-check range, and `gh pr create --base`. Once it is gone they fall
+  back to the default branch.
+- **The PR says so.** Its body opens with "Stacked on <parent PR>, merge that
+  first.", and the PR row sent to pinboard carries `baseBranch`,
+  `stackedOnTaskId` and `stackedOnSha` (an older pinboard ignores them).
+- **The agent is told.** The prompt names the parent task and its PR, and
+  says to build on that work rather than redo it.
+
+Moving a stacked branch onto the default branch once its parent merges (a
+restack) is not part of this yet.
+
 ## Housekeeping
 
 A past task, after the disk hit 98% of 32G on 2026-09-28 (docker images,
