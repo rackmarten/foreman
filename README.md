@@ -244,7 +244,8 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   `work task claim <id>`, `work task comment <id> <text...>`,
   `work task handoff <id> [--completed=] [--changed=] [--verified=]
   [--problems=] [--discovered=] [--next=] [--effort=] [--cost=]
-  [--duration-ms=] [--turns=] [--agent=<agentName>]`,
+  [--duration-ms=] [--turns=] [--agent=<agentName>] [--summary=]
+  [--checklist=<item>]...` (`--checklist` is repeatable, one item each),
   `work task complete <id>` - every write stamps `actorType`/`actorName`
   provenance (`WORK_ACTOR_TYPE`/`WORK_ACTOR_NAME` env vars, default
   `human`/the OS username) onto a `task_events` row, per
@@ -977,8 +978,12 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   next attempt's prompt lists every answered ask and assumption
   (`askHistoryLines`), so a run resumed after `needs_input` starts from the
   answers. The handoff has a `summary` (a TL;DR of at most 5 lines plus a
-  "Needs you:" line when something is left for a human) and a `howToVerify`;
-  `work task handoff --summary=` sets the former by hand. The PR body
+  "Needs you:" line when something is left for a human), a `howToVerify`,
+  and an optional `checklist`: one short, testable line per thing a human
+  has to check by hand (play, feel, look, browser), with nothing the
+  automated tests already prove, empty when there is nothing to check by
+  hand. The checklist is sent to pinboard with the handoff;
+  `work task handoff --summary= --checklist=<item>...` sets them by hand. The PR body
   (`formatPrBody`) leads with the summary, then `Closes pinboard task #id`, a
   short `## Changed` (the files the branch touches) and `## How to verify`,
   with the full Completed/Changed/Verified/Problems/Discovered collapsed

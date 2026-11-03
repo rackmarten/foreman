@@ -8,6 +8,11 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Added
+- Handoffs carry an optional `checklist`: one short, testable line per thing
+  a human has to check by hand, with nothing the automated tests already
+  prove. Agent runs fill it in through the handoff schema and it is sent to
+  pinboard with the handoff; `work task handoff --checklist=<item>`
+  (repeatable) sets it from an interactive session.
 - README documents foreman's own SSH key (`state/home/.ssh/foreman_ed25519`)
   and its fingerprint, installed next to the operator's key on every service
   container so its access can be revoked separately.
