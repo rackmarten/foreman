@@ -119,7 +119,8 @@ async function collect(
       title: task.title,
       prUrl: pr.url,
       branch: pr.branchName as string,
-      parentTaskId: task.stackOn?.taskId ?? null,
+      // from the PR row, not task.stackOn: the task list doesn't compute that.
+      parentTaskId: pr.stackedOnTaskId ?? null,
       checklist: latest?.checklist ?? [],
     });
   }
