@@ -187,6 +187,8 @@ export interface Handoff {
   durationMs: number | null;
   numTurns: number | null;
   permissionDenials: unknown;
+  // Optional so an older pinboard parses.
+  checklist?: string[] | null;
   createdAt: string;
   // Set on GET /tasks rows (pinboard derives it from the child relation).
   parentTaskId?: number | null;
@@ -459,6 +461,11 @@ export interface ProjectHandoff extends Handoff {
 
 export function getProjectHandoffs(projectId: number, limit = 20): Promise<ProjectHandoff[]> {
   return get(`/projects/${projectId}/handoffs?limit=${limit}`);
+}
+
+// a task's handoffs, newest first.
+export function getTaskHandoffs(taskId: number): Promise<Handoff[]> {
+  return get(`/tasks/${taskId}/handoffs`);
 }
 
 export interface Actor {

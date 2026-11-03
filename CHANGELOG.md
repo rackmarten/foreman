@@ -8,6 +8,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Added
+- `work playtest --project=<slug> [--push] [--dry-run]`: run inside a clone
+  of a project's repo, it creates `playtest/<yyyymmdd>-<n>` from
+  `origin/<default>` and merges the open PR of every task in review
+  (`--no-ff`, stack leaves only, a conflicting merge is aborted and
+  skipped), then prints each task with its PR and latest handoff checklist.
+  Refuses a dirty worktree; the branch stays local unless `--push`.
 - Handoffs carry an optional `checklist`: one short, testable line per thing
   a human has to check by hand, with nothing the automated tests already
   prove. Agent runs fill it in through the handoff schema and it is sent to
