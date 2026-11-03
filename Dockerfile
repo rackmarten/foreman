@@ -31,7 +31,7 @@ RUN apt-get update \
  && echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      git openssh-client python3 procps sudo less \
+      git git-lfs openssh-client python3 procps sudo less \
       gh docker-ce-cli docker-compose-plugin docker-buildx-plugin \
  && apt-get purge -y gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
@@ -53,7 +53,8 @@ RUN groupmod -n marek node \
 # git over https authenticates with GH_TOKEN through gh (decision 3 in #514).
 # git@github.com remotes are rewritten to https too, so GitHub
 # never sees the SSH key in state/home/.ssh (that key is for the LXCs only).
-RUN git config --system credential.https://github.com.helper '' \
+RUN git lfs install --system --skip-repo \
+ && git config --system credential.https://github.com.helper '' \
  && git config --system --add credential.https://github.com.helper '!/usr/bin/gh auth git-credential' \
  && git config --system --add url.https://github.com/.insteadOf 'git@github.com:' \
  && git config --system --add url.https://github.com/.insteadOf 'ssh://git@github.com/'

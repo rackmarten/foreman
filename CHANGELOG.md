@@ -62,6 +62,9 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- The image installs `git-lfs` and registers its filters system-wide, so
+  task clones of a repo that uses Git LFS check out the real files and can
+  push (its pre-push hook needs `git-lfs`).
 - The CI wait no longer reads "no run found" as green when the repo has CI.
   A PR that conflicts with its base (which gets no `pull_request` run) is
   rebased onto its base automatically and otherwise handed back as a merge
