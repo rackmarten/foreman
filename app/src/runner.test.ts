@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
@@ -34,6 +34,8 @@ import {
   hasTimedOut,
   isSessionResumableBy,
   prepareAttempt,
+  backupCommentLines,
+  backupDir,
   pushForceArgs,
   pushNeedsForce,
   pushTaskBranch,
@@ -262,11 +264,8 @@ test("summarizeStreamLine skips blank assistant text and non-content lines", () 
 // per-task clones rather than worktrees. The two "nothing to resume" cases
 // never touch git or the network at all; the successful-rebase cases use a
 // real throwaway git repo (and a real clone made by ensureTaskClone) so the
-// rebase itself is exercised for real, not mocked. Deliberately not covering
-// the rebase-conflict fallback here - that path calls addComment (a real
-// pinboard network call, no DI seam to swap in a fake), so it's left to the
-// plan's manual smoke test instead of risking a unit test writing a real
-// comment somewhere.
+// rebase itself is exercised for real, not mocked. The rebase-failure
+// fallback tests pass a fake comment poster, so nothing reaches pinboard.
 function sessionTask(overrides: Partial<Task> = {}): Task {
   return { id: 1, claudeSessionId: null, activeWorktreeName: null, relatedProjectIds: [], ...overrides } as Task;
 }
@@ -399,6 +398,127 @@ test("prepareAttempt resumes cleanly after the branch's own work was squash-merg
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A retained clone whose one commit conflicts with what main gained since.
+function conflictingClone(root: string, taskId: number): { originPath: string; repoPath: string; clonePath: string; sha: string } {
+  const paths = taskClone(root, taskId);
+  writeFileSync(join(paths.clonePath, "shared.txt"), "from the task\n");
+  git(paths.clonePath, ["add", "shared.txt"]);
+  git(paths.clonePath, ["commit", "-m", "finished task work"]);
+  const sha = git(paths.clonePath, ["rev-parse", "HEAD"]).toString().trim();
+  writeFileSync(join(paths.repoPath, "shared.txt"), "from main\n");
+  git(paths.repoPath, ["add", "shared.txt"]);
+  execFileSync("git", ["commit", "-m", "conflicting main change"], { cwd: paths.repoPath, stdio: "pipe", env: { ...process.env, ...gitEnv } });
+  git(paths.repoPath, ["push", "origin", "main"]);
+  return { ...paths, sha };
+}
+
+function commentRecorder(): { bodies: string[]; post: (id: number, actor: unknown, body: string) => Promise<void> } {
+  const bodies: string[] = [];
+  return { bodies, post: async (_id, _actor, body) => void bodies.push(body) };
+}
+
+test("prepareAttempt pushes a backup branch for unpushed commits before dropping a workdir it cannot rebase", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foreman-prepare-attempt-backup-"));
+  try {
+    const { originPath, repoPath, clonePath, sha } = conflictingClone(root, 4);
+    const comments = commentRecorder();
+    const result = await prepareAttempt(
+      sessionTask({ id: 4, claudeSessionId: "sess-4", activeWorktreeName: "task-4" }),
+      projectAt(repoPath),
+      [],
+      { actorType: "agent", actorName: "test" },
+      null,
+      join(root, "tasks"),
+      comments.post,
+    );
+    assert.deepEqual(result, { mode: "fresh" });
+    assert.equal(existsSync(clonePath), false);
+
+    const refs = git(originPath, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).toString().trim().split("\n");
+    const backup = refs.find((r) => r.startsWith(`${taskBranch(4)}-backup-`));
+    assert.ok(backup, `no backup branch in ${refs.join(", ")}`);
+    git(originPath, ["merge-base", "--is-ancestor", sha, backup!]);
+
+    assert.equal(comments.bodies.length, 1);
+    assert.match(comments.bodies[0], /^Could not rebase the retained session's workdir onto main/);
+    assert.ok(comments.bodies[0].includes(backup!), comments.bodies[0]);
+    assert.match(comments.bodies[0], /Cherry-pick or reuse/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("prepareAttempt keeps a bundle outside the workdir when the backup branch cannot be pushed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foreman-prepare-attempt-bundle-"));
+  try {
+    const { repoPath, clonePath, sha } = conflictingClone(root, 5);
+    git(clonePath, ["remote", "set-url", "--push", "origin", join(root, "nowhere.git")]);
+    const comments = commentRecorder();
+    const tasksRoot = join(root, "tasks");
+    const result = await prepareAttempt(
+      sessionTask({ id: 5, claudeSessionId: "sess-5", activeWorktreeName: "task-5" }),
+      projectAt(repoPath),
+      [],
+      { actorType: "agent", actorName: "test" },
+      null,
+      tasksRoot,
+      comments.post,
+    );
+    assert.deepEqual(result, { mode: "fresh" });
+    assert.equal(existsSync(clonePath), false);
+
+    const bundle = readdirSync(backupDir(5, tasksRoot)).find((f) => f.endsWith(".bundle"));
+    assert.ok(bundle);
+    const bundlePath = join(backupDir(5, tasksRoot), bundle!);
+    git(repoPath, ["fetch", "origin"]);
+    git(repoPath, ["bundle", "verify", bundlePath]);
+    git(repoPath, ["fetch", bundlePath, "HEAD"]);
+    assert.equal(git(repoPath, ["rev-parse", "FETCH_HEAD"]).toString().trim(), sha);
+    assert.ok(comments.bodies[0].includes(bundlePath), comments.bodies[0]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("prepareAttempt's rebase-failure fallback is unchanged when there is nothing unpushed to keep", async () => {
+  const root = mkdtempSync(join(tmpdir(), "foreman-prepare-attempt-nothing-"));
+  try {
+    const { originPath, repoPath, clonePath } = taskClone(root, 6);
+    // Nothing committed on the task branch; the fetch fails instead.
+    git(clonePath, ["remote", "set-url", "origin", join(root, "gone.git")]);
+    const comments = commentRecorder();
+    const tasksRoot = join(root, "tasks");
+    const result = await prepareAttempt(
+      sessionTask({ id: 6, claudeSessionId: "sess-6", activeWorktreeName: "task-6" }),
+      projectAt(repoPath),
+      [],
+      { actorType: "agent", actorName: "test" },
+      null,
+      tasksRoot,
+      comments.post,
+    );
+    assert.deepEqual(result, { mode: "fresh" });
+    assert.equal(existsSync(clonePath), false);
+    assert.equal(existsSync(backupDir(6, tasksRoot)), false);
+    assert.equal(git(originPath, ["branch", "--list", "*backup*"]).toString().trim(), "");
+    assert.equal(comments.bodies.length, 1);
+    assert.match(comments.bodies[0], /^Could not rebase the retained session's workdir onto main, starting a fresh attempt instead: /);
+    assert.doesNotMatch(comments.bodies[0], /saved|backup/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("backupCommentLines names each saved location and is empty when nothing was saved", () => {
+  assert.deepEqual(backupCommentLines([]), []);
+  const lines = backupCommentLines([
+    { repoSlug: "a", commits: 1, kind: "ref", location: "fix-thing-backup-20261104-120000" },
+    { repoSlug: "b", commits: 3, kind: "bundle", location: "/tasks/.backups/task-1/b.bundle" },
+  ]);
+  assert.match(lines[1], /a: 1 commit in branch `fix-thing-backup-20261104-120000` on origin/);
+  assert.match(lines[2], /b: 3 commits in bundle `\/tasks\/.backups\/task-1\/b.bundle`/);
 });
 
 // the decision prepareAttempt makes before ever considering a

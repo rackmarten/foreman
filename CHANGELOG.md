@@ -62,6 +62,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- A retained workdir that could not be rebased onto main was deleted with
+  any commits never pushed in it. Before the runner drops a workdir (rebase
+  failure, a crashed attempt's leftover clone, a timeout or forced stop), it
+  now pushes those commits to a `<task branch>-backup-<timestamp>` branch, or
+  keeps a bundle under `<WORK_TASK_ROOT>/.backups/` if the push fails, and
+  the task comment, which the next attempt reads, says where they are.
 - The image installs `git-lfs` and registers its filters system-wide, so
   task clones of a repo that uses Git LFS check out the real files and can
   push (its pre-push hook needs `git-lfs`).

@@ -1198,6 +1198,21 @@ by the runner and removed by its sweep:
   to the three-day rule. The sweep is
   now one recursive delete instead of removing a worktree and its branch in
   each repo.
+- **Unpushed commits survive a dropped workdir.** A retained workdir that
+  cannot be rebased onto main (`prepareAttempt`), a crashed attempt's
+  workdir replaced by a fresh clone, and a session killed by its timeout or
+  a forced stop all remove the workdir. Before they do, every clone in it
+  with commits its base branch lacks has them saved: as a
+  `<task branch>-backup-<timestamp>` branch pushed to that repo's origin
+  (a public repo's passes the same leak check as a PR branch first), or,
+  when that push fails or is blocked, as a bundle in
+  `<WORK_TASK_ROOT>/.backups/task-<id>/` (and if even that fails, the clone
+  itself is moved there). The task comment names each backup and tells the
+  next attempt, which reads it in its prompt, to cherry-pick those commits
+  rather than redo them. Nothing deletes backup branches or `.backups/`;
+  clean them up by hand once the work has landed. The retention sweep does
+  not take backups: a done task's squash-merged commits never match main's
+  hashes, and a rejected one was discarded on purpose.
 - **Deploy lock.** Since two tasks can now merge to the same repo at once,
   the one step that must not overlap is the deploy: the pipeline poller's
   `deploying` stage takes `/app/tasks/.locks/<repo>.deploy.lock` before

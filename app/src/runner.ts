@@ -12,7 +12,7 @@
 // on this.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { claudeConfigPath, conventionsFile, workspaceRoot } from "./paths.js";
 import { basename, join } from "node:path";
 import {
@@ -96,7 +96,7 @@ import {
   seatCooldownKey,
   updateClaude,
 } from "./infra.js";
-import { isPublicRepo, repoOrgFor, withRetry } from "./pipeline.js";
+import { githubOrgFromUrl, isPublicOrg, isPublicRepo, repoOrgFor, withRetry } from "./pipeline.js";
 import { formatLeakComment, LEAK_PATTERNS_FILE, LeakBlockedError, leakGateForPush } from "./leak-gate.js";
 import { pendingQuestion } from "./ask.js";
 import { ROOT_ACCESS_LABEL, ROOT_SET_KEYS, rootWaitActive } from "./root.js";
@@ -720,6 +720,121 @@ function cleanupWorkdir(taskId: number, root: string = TASK_ROOT): void {
   }
 }
 
+// Commits a clone holds that its base branch (origin/<default>, or a
+// stacked parent's branch) does not, saved somewhere a workdir delete cannot
+// reach. Found live: a retained workdir whose rebase onto main failed was
+// deleted with the only copy of a finished change in it.
+export interface CommitBackup {
+  repoSlug: string;
+  commits: number;
+  kind: "ref" | "bundle" | "copy";
+  // The pushed branch name for "ref", a path for "bundle" and "copy".
+  location: string;
+}
+
+export function backupDir(taskId: number, root: string = TASK_ROOT): string {
+  return join(root, ".backups", `task-${taskId}`);
+}
+
+function backupStamp(now = new Date()): string {
+  return now.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+}
+
+// Every clone in the task's workdir is checked, so this needs no repo
+// targets and works for a related repo cloned mid-run too. Tries, in order:
+// a backup branch pushed to the clone's origin (the same remote and
+// credentials the task branch is pushed with), a bundle under
+// `<root>/.backups/task-<id>/`, and as a last resort moving the clone itself
+// there. Never throws: a backup step that cannot run is no reason to stop.
+export function backupUnpushedCommits(taskId: number, root: string = TASK_ROOT, stamp = backupStamp()): CommitBackup[] {
+  const repos = join(taskWorkdir(taskId, root), "repos");
+  if (!existsSync(repos)) return [];
+  const backups: CommitBackup[] = [];
+  for (const repoSlug of readdirSync(repos).sort()) {
+    const repoPath = join(repos, repoSlug);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repoPath, stdio: "pipe" }).toString().trim();
+    let baseBranch: string;
+    let commits: number;
+    try {
+      baseBranch = resolveBaseBranch(repoPath);
+      commits = Number(git("rev-list", "--count", `origin/${baseBranch}..HEAD`));
+    } catch {
+      continue;
+    }
+    if (!commits) continue;
+    const base = `origin/${baseBranch}`;
+    const branch = currentBranch(repoPath) ?? taskBranch(taskId);
+    const ref = `${branch}-backup-${stamp}`;
+    try {
+      // A public repo's backup branch is as public as its PR branch, so it
+      // passes the same leak gate; a blocked one is bundled instead.
+      let org: string | null = null;
+      try {
+        org = githubOrgFromUrl(git("remote", "get-url", "origin"));
+      } catch {
+        // no origin URL - treated as private, and the push below fails anyway
+      }
+      const gate = leakGateForPush(repoPath, baseBranch, org !== null && isPublicOrg(org), "", "", { branchName: ref });
+      if (gate.blocked) throw new Error(`leak check blocked the backup branch${gate.reason ? `: ${gate.reason}` : ""}`);
+      git("push", "origin", `HEAD:refs/heads/${ref}`);
+      backups.push({ repoSlug, commits, kind: "ref", location: ref });
+      continue;
+    } catch (err) {
+      console.error(`could not push backup ref for task ${taskId} (${repoSlug}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const dir = backupDir(taskId, root);
+    try {
+      mkdirSync(dir, { recursive: true });
+      const bundle = join(dir, `${repoSlug}-${stamp}.bundle`);
+      git("bundle", "create", bundle, "HEAD", `^${base}`);
+      backups.push({ repoSlug, commits, kind: "bundle", location: bundle });
+      continue;
+    } catch (err) {
+      console.error(`could not bundle task ${taskId} (${repoSlug}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      const copy = join(dir, `${repoSlug}-${stamp}`);
+      renameSync(repoPath, copy);
+      backups.push({ repoSlug, commits, kind: "copy", location: copy });
+    } catch (err) {
+      console.error(`could not keep task ${taskId}'s ${repoSlug} clone: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return backups;
+}
+
+// Worded for the next attempt's agent as much as for the operator: the
+// comment lands in that attempt's prompt through commentContext.
+export function backupCommentLines(backups: readonly CommitBackup[]): string[] {
+  if (!backups.length) return [];
+  const where = (b: CommitBackup) =>
+    b.kind === "ref"
+      ? `branch \`${b.location}\` on origin (\`git fetch origin ${b.location}\`)`
+      : b.kind === "bundle"
+        ? `bundle \`${b.location}\` (\`git fetch ${b.location} HEAD\`)`
+        : `the old clone, moved to \`${b.location}\``;
+  return [
+    "Commits the previous attempt never got onto main were saved before its workdir was removed:",
+    ...backups.map((b) => `- ${b.repoSlug}: ${b.commits} commit${b.commits === 1 ? "" : "s"} in ${where(b)}`),
+    "Cherry-pick or reuse those commits rather than redoing that work. If a bundle or copy is outside your " +
+      "workdir and you cannot read it, say so in your handoff.",
+  ];
+}
+
+// cleanupWorkdir for a workdir that may still hold work: saves its unpushed
+// commits first, and returns what it saved for the caller's task comment.
+export function cleanupWorkdirKeepingCommits(taskId: number, root: string = TASK_ROOT): CommitBackup[] {
+  const backups = backupUnpushedCommits(taskId, root);
+  cleanupWorkdir(taskId, root);
+  return backups;
+}
+
+// Says where the commits went, only when there were any.
+async function noteBackups(taskId: number, agentName: string, reason: string, backups: readonly CommitBackup[]): Promise<void> {
+  if (!backups.length) return;
+  await addComment(taskId, { actorType: "agent", actorName: agentName }, [reason, ...backupCommentLines(backups)].join("\n")).catch(() => {});
+}
+
 const CLAUDE_CONFIG_PATH = claudeConfigPath();
 
 // Claude Code ignores a repo's .claude/settings.json
@@ -853,6 +968,7 @@ export async function prepareAttempt(
   actor: Actor,
   licenseId: number | null = null,
   root: string = TASK_ROOT,
+  post: (taskId: number, actor: Actor, body: string) => Promise<unknown> = addComment,
 ): Promise<PreparedAttempt> {
   if (!task.claudeSessionId) return { mode: "fresh" };
 
@@ -876,12 +992,17 @@ export async function prepareAttempt(
     .map((t) => rebaseOntoMain(t.repoPath, branch))
     .find((r): r is { ok: false; error: string } => !r.ok);
 
+  // rebaseOntoMain has already aborted the failed rebase, so each clone is
+  // back on its own branch with its commits for the backup to find.
   if (failure) {
-    cleanupWorkdir(task.id, root);
-    await addComment(
+    const backups = cleanupWorkdirKeepingCommits(task.id, root);
+    await post(
       task.id,
       actor,
-      `Could not rebase the retained session's workdir onto main, starting a fresh attempt instead: ${failure.error}`,
+      [
+        `Could not rebase the retained session's workdir onto main, starting a fresh attempt instead: ${failure.error}`,
+        ...backupCommentLines(backups),
+      ].join("\n"),
     ).catch(() => {});
     return { mode: "fresh" };
   }
@@ -1048,7 +1169,9 @@ async function runOneAttempt(
     // rather than being reused half-way.
     if (!resume) {
       branch = await resolveTaskBranch(task, targets);
-      cleanupWorkdir(task.id);
+      // Usually already gone (prepareAttempt removed it, or there never was
+      // one), but a crash with no session id to resume leaves it in place.
+      await noteBackups(task.id, agentName, "The previous attempt's workdir was replaced by a fresh clone.", cleanupWorkdirKeepingCommits(task.id));
     }
     ensureTaskClones(task.id, targets, branch, TASK_ROOT, task);
     recordWorkspaceRoot(task.id);
@@ -1236,7 +1359,7 @@ async function runOneAttempt(
     await new Promise((resolve) => setTimeout(resolve, 10_000));
     child.kill("SIGKILL");
     await waitForExit(exited);
-    cleanupWorkdir(task.id);
+    await noteBackups(task.id, agentName, "The session timed out before its commits were pushed.", cleanupWorkdirKeepingCommits(task.id));
     return { ok: false, retained: false, error: `hard timeout (${opts.timeoutMs}ms) exceeded, session killed` };
   }
 
@@ -1275,7 +1398,7 @@ async function runOneAttempt(
 
     if (!compliedGracefully) {
       await waitForExit(exited);
-      cleanupWorkdir(task.id);
+      await noteBackups(task.id, agentName, "The session was stopped before its commits were pushed.", cleanupWorkdirKeepingCommits(task.id));
       return {
         ok: false,
         retained: false,
