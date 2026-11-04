@@ -8,6 +8,16 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Added
+- Task runs use the task's reasoning effort: pinboard's
+  `effectiveReasoningEffort` (the task's own, else its project's default),
+  else `CLAUDE_EFFORT`, else `medium`. An unknown value logs a warning and
+  falls back instead of failing the run. The attempt's start comment now
+  records the model and effort.
+- `work task create|update --reasoning=medium|high|none` sets or clears a
+  task's reasoning effort, and the task listing shows `reasoning:<value>`.
+- Task clones of a Git LFS repo install the LFS hooks and pull the LFS files
+  from GitHub, so the checkout has real files and pushing a branch uploads
+  new LFS objects.
 - `work playtest --project=<slug> [--push] [--dry-run]`: run inside a clone
   of a project's repo, it creates `playtest/<yyyymmdd>-<n>` from
   `origin/<default>` and merges the open PR of every task in review
@@ -49,6 +59,8 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 - The pipeline never merges a PR whose base is not the default branch.
 
 ### Changed
+- `CLAUDE_EFFORT` is validated: only `medium` and `high` are accepted, any
+  other value warns and falls back to `medium`.
 - Task branches no longer carry the task id when a task touches a public
   repo: they are named after the task title (`add-player-launcher`, with
   `-2`, `-3`, ... if origin already has that name), and `<id>-<slug>` for

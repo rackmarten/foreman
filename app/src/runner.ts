@@ -59,7 +59,7 @@ import {
   type TaskDetail,
   type TaskRelation,
 } from "./pinboard.js";
-import { DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS, DEFAULT_MODEL, modelArgs } from "./agent-settings.js";
+import { DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS, DEFAULT_MODEL, modelArgs, resolveTaskEffort, type ReasoningEffort } from "./agent-settings.js";
 import { resolveAgentForTask, type ResolvedAgent } from "./routing.js";
 import { buildEightBallPrompt, createEightBallClient } from "./eightball.js";
 import { DISK_CHECK, EIGHT_BALL_CHECK, eightBallProject, health, seatCheck } from "./health.js";
@@ -1137,6 +1137,12 @@ export async function resolveTaskBranch(
   });
 }
 
+// The start comment records the model and effort, so runs at different
+// efforts can be told apart later.
+export function attemptStartComment(attempt: number, attempts: number, model: string, effort: string): string {
+  return `Attempt ${attempt}/${attempts} starting (model ${model}, effort ${effort}).`;
+}
+
 async function runOneAttempt(
   task: Task,
   project: Project,
@@ -1145,6 +1151,7 @@ async function runOneAttempt(
   opts: RunOptions,
   agentName: string,
   model: string,
+  effort: ReasoningEffort,
   spawnEnv: SpawnEnv,
   resume?: { sessionId: string; branch: string },
 ): Promise<AttemptOutcome> {
@@ -1198,7 +1205,7 @@ async function runOneAttempt(
     "--output-format",
     "stream-json",
     "--verbose",
-    ...modelArgs(model),
+    ...modelArgs(model, effort),
     "--max-budget-usd",
     String(opts.budgetUsd),
     // I21 follow-up: a past task's run hit 6 denials, 4 of them not because
@@ -2086,6 +2093,7 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
 
   ensureGhAuthenticated();
   const model = resolvedAgent.model ?? DEFAULT_MODEL;
+  const effort = resolveTaskEffort(task);
 
   // Ask pinboard whether this specific task may start, rather than deciding
   // here. `--override` skips the budget gates only; a repo conflict or a full
@@ -2142,7 +2150,8 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
 
     attempt += 1;
     await setAttemptCount(taskId, attempt);
-    await addComment(taskId, actor, `Attempt ${attempt}/${opts.attempts} starting.`);
+    await addComment(taskId, actor, attemptStartComment(attempt, opts.attempts, model, effort));
+    console.log(`Task ${taskId}: attempt ${attempt} with model ${model}, effort ${effort}.`);
 
     const renewTimer = setInterval(() => {
       renewLease(taskId, opts.leaseSeconds).catch((err) => console.error(`lease renewal failed: ${String(err)}`));
@@ -2157,7 +2166,7 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
 
     let outcome: AttemptOutcome;
     try {
-      outcome = await runOneAttempt(task, project, projects, attempt, effectiveOpts, actor.actorName, model, spawnEnv, resume);
+      outcome = await runOneAttempt(task, project, projects, attempt, effectiveOpts, actor.actorName, model, effort, spawnEnv, resume);
     } finally {
       clearInterval(renewTimer);
       await releaseLease(taskId).catch(() => {});
