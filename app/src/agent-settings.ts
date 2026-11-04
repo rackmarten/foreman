@@ -10,13 +10,42 @@
 // attempts with nothing to show for it.
 export const DEFAULT_MODEL = process.env.CLAUDE_MODEL ?? "claude-opus-5-5";
 
+// The efforts pinboard stores for a task or project. Anything else (a typo in
+// CLAUDE_EFFORT, a value from a newer pinboard) logs a warning and falls back
+// to the next source instead of failing the run.
+export const REASONING_EFFORTS = ["medium", "high"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+type Warn = (message: string) => void;
+
+function validEffort(value: string | null | undefined, source: string, warn: Warn): ReasoningEffort | null {
+  if (!value) return null;
+  if (isReasoningEffort(value)) return value;
+  warn(`ignoring unknown ${source} effort '${value}', expected ${REASONING_EFFORTS.join(" or ")}`);
+  return null;
+}
+
 // Takes the env as a parameter so tests can pin it: a test run inside a
 // Claude Code session inherits that session's own CLAUDE_EFFORT.
-export function resolveEffort(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CLAUDE_EFFORT || "medium";
+export function resolveEffort(env: NodeJS.ProcessEnv = process.env, warn: Warn = console.warn): ReasoningEffort {
+  return validEffort(env.CLAUDE_EFFORT, "CLAUDE_EFFORT", warn) ?? "medium";
 }
 
 export const DEFAULT_EFFORT = resolveEffort();
+
+// A task run's effort: the task's own effective effort from pinboard (its own
+// value, else its project's default), else CLAUDE_EFFORT, else medium.
+export function resolveTaskEffort(
+  task: { effectiveReasoningEffort?: string | null },
+  env: NodeJS.ProcessEnv = process.env,
+  warn: Warn = console.warn,
+): ReasoningEffort {
+  return validEffort(task.effectiveReasoningEffort, "task", warn) ?? resolveEffort(env, warn);
+}
 
 // The `--model`/`--effort` pair every task run passes (runner.ts).
 export function modelArgs(model: string, effort: string = DEFAULT_EFFORT): string[] {

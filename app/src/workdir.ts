@@ -412,9 +412,40 @@ export function ensureTaskClone(opts: CloneOptions): string {
   const stack = remote && opts.stackOn ? fetchStackParent(dest, opts.stackOn, ownBranchExists ? base : null) : null;
   if (stack && !ownBranchExists) base = `origin/${stack.branch}`;
   execFileSync("git", ["checkout", "-b", opts.branch, base], { cwd: dest, stdio: "pipe" });
+  ensureLfsFiles(dest);
   if (stack) recordStack(dest, stack);
   seedNodeModules(opts.sourceRepo, dest);
   return dest;
+}
+
+// Whether the checkout tracks anything with Git LFS, read from its
+// .gitattributes files (the root one and any nested ones).
+export function usesLfs(repoPath: string): boolean {
+  try {
+    execFileSync("git", ["grep", "-q", "filter=lfs", "--", ".gitattributes", "**/.gitattributes"], { cwd: repoPath, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A repo with LFS files gets real files, not pointers, and the LFS hooks that
+// make foreman's plain `git push` upload new objects. The objects come from
+// origin (GitHub, through the same credential helper as the fetch above),
+// never from the workspace clone, which may be stale or hold only pointers.
+// The checkout usually smudged them already through the image's system-wide
+// filter; `git lfs pull` is then a no-op, and otherwise downloads them. A
+// missing git-lfs fails the clone here rather than leaving pointer files for
+// the session to trip over.
+function ensureLfsFiles(repoPath: string): void {
+  if (!usesLfs(repoPath)) return;
+  try {
+    execFileSync("git", ["lfs", "install", "--local"], { cwd: repoPath, stdio: "pipe" });
+    execFileSync("git", ["lfs", "pull"], { cwd: repoPath, stdio: "pipe" });
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new Error(`this repo uses Git LFS, but fetching its LFS files failed: ${stderr || String(err)}`);
+  }
 }
 
 // `forkedFrom`, when given, is an existing branch whose fork point off the

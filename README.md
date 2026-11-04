@@ -236,7 +236,7 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   every sibling it `depends_on`, then by priority) with status, executor
   and any open blocked-by; on a child it names the story. Grooming (task
   #407): `work task update <id> [--title= --description= --status= --type=
-  --executor= --priority= --autonomy= --effort= --parent=<id>|none]`
+  --executor= --priority= --autonomy= --effort= --reasoning= --parent=<id>|none]`
   PATCHes only the given fields, and `--parent` replaces the existing
   parent relation; `work task label <id> add|remove <name>` resolves the
   label by name and creates it on add; `work task create` takes repeatable
@@ -432,9 +432,18 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   **Model and effort.** Every task run passes `--model` and
   `--effort` explicitly, so nothing is inherited from the run user's
   `~/.claude/settings.json`. Model: the pinboard agent row's `model`, else
-  `CLAUDE_MODEL`, else `claude-opus-5-5`. Effort: `CLAUDE_EFFORT`, else
-  `medium`. Chat threads use their own `effort` when set and the same default
-  otherwise. Both variables go in `foreman-dispatch`'s environment. Opus 5.5
+  `CLAUDE_MODEL`, else `claude-opus-5-5`. Effort: the task's
+  `effectiveReasoningEffort` from pinboard (its own `reasoningEffort`, else
+  its project's `defaultReasoningEffort`), else `CLAUDE_EFFORT`, else
+  `medium`. Only `medium` and `high` are valid; any other value, from either
+  source, logs a warning and falls through to the next one instead of
+  failing the run. The attempt's start comment records both ("Attempt 1/3
+  starting (model claude-opus-5-5, effort high).") so runs at different
+  efforts can be compared later. `work task create|update --reasoning=medium|high|none`
+  sets a task's own value (`none` clears it back to the project default;
+  `--effort=` stays story points), and the one-line task listing shows
+  `reasoning:<value>` when the task sets one. Chat threads use their own
+  `effort` when set and the same default otherwise. Both variables go in `foreman-dispatch`'s environment. Opus 5.5
   needs Claude Code 2.1.280 or newer for every run user.
 
   `WORKSPACE_ROOT` stays shared across every license for this increment -
@@ -1165,6 +1174,15 @@ by the runner and removed by its sweep:
   repointed at GitHub and
   the task's branch (see "Branch names" above) is cut from `origin/main` - not from the
   workspace checkout's own `main`, which can be days stale.
+- **Git LFS.** A repo whose `.gitattributes` uses `filter=lfs` gets
+  `git lfs install --local` (the hooks that make foreman's plain `git push`
+  upload new LFS objects) and `git lfs pull` right after the checkout. The
+  objects come from GitHub through the same `gh` credential helper as the
+  fetch, never from the workspace clone, which may be stale or hold only
+  pointer files. The image's system-wide LFS filter usually smudged them
+  during the checkout already, so the pull is normally a no-op. A failure
+  here (no `git-lfs`, no network) fails the attempt's setup rather than
+  leaving pointer files for the session to trip over.
 - **node_modules is copied, not installed**, for each package directory whose
   `package-lock.json` is byte-identical to the workspace checkout's. A real
   copy (`cp -a`), never a hardlink: a tool that rewrites a file in place

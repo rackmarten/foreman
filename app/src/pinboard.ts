@@ -5,6 +5,7 @@
 // reverse-proxy.
 
 import { SseParser, type SseEvent } from "./sse.js";
+import type { ReasoningEffort } from "./agent-settings.js";
 
 const BASE_URL = process.env.PINBOARD_URL ?? "http://pinboard:8095";
 // Pinboard PINBOARD_URL is the origin; the JSON API lives under /api.
@@ -62,6 +63,11 @@ export interface Task {
   // The parent task whose unmerged PR this task builds on (see "Stacked
   // branches" in the README). Optional so an older pinboard parses.
   stackOn?: StackOn | null;
+  // The task's own reasoning effort, and that or its project's default.
+  // Optional so an older pinboard parses; runner.ts's resolveTaskEffort
+  // validates the value.
+  reasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -166,6 +172,8 @@ export interface Project {
   // project needs write access to, beyond its own localPath - see
   // pinboard's schema.ts for the full explanation.
   relatedProjectIds: number[];
+  // Effort for this project's tasks that set none themselves.
+  defaultReasoningEffort?: ReasoningEffort | null;
 }
 
 export interface TaskEvent {
@@ -350,6 +358,8 @@ export interface UpdateTaskInput {
   priority?: number;
   autonomyLevel?: number;
   estimatedEffort?: number;
+  // null clears it, so the task inherits its project's default.
+  reasoningEffort?: ReasoningEffort | null;
 }
 
 export async function updateTask(taskId: number, input: UpdateTaskInput): Promise<Task> {
@@ -566,6 +576,7 @@ export interface CreateTaskInput {
   priority?: number;
   autonomyLevel?: number;
   estimatedEffort?: number;
+  reasoningEffort?: ReasoningEffort;
   // tasks.parentTaskId was dropped in favor of taskRelations
   // (the single source of truth foreman's runner.ts already reads for
   // subtask context) - createTask wires this up as a "child" relation

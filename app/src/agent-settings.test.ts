@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS } from "./agent-settings.js";
+import { DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS, resolveEffort, resolveTaskEffort } from "./agent-settings.js";
 
 // Claude Code's Bash rule shape: `prefix:*` is a prefix match, and `*`
 // elsewhere is a wildcard. Enough to check the lists against real commands.
@@ -41,4 +41,26 @@ test("mutating gh commands stay denied", () => {
     assert.ok(denied(cmd), cmd);
   }
   assert.ok(denied("git push origin HEAD"));
+});
+
+test("resolveTaskEffort: the task's effort wins, then CLAUDE_EFFORT, then medium", () => {
+  const warnings: string[] = [];
+  const warn = (m: string) => warnings.push(m);
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "high" }, { CLAUDE_EFFORT: "medium" }, warn), "high");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: null }, { CLAUDE_EFFORT: "high" }, warn), "high");
+  assert.equal(resolveTaskEffort({}, { CLAUDE_EFFORT: "high" }, warn), "high");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: null }, {}, warn), "medium");
+  assert.deepEqual(warnings, []);
+});
+
+test("resolveTaskEffort warns and falls back on an unknown value instead of failing", () => {
+  const warnings: string[] = [];
+  const warn = (m: string) => warnings.push(m);
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "max" as never }, { CLAUDE_EFFORT: "high" }, warn), "high");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "max" as never }, { CLAUDE_EFFORT: "low" }, warn), "medium");
+  assert.equal(resolveEffort({ CLAUDE_EFFORT: "turbo" }, warn), "medium");
+  assert.equal(warnings.length, 4);
+  assert.match(warnings[0], /unknown task effort 'max'/);
+  assert.match(warnings[2], /unknown CLAUDE_EFFORT effort 'low'/);
+  assert.match(warnings[3], /unknown CLAUDE_EFFORT effort 'turbo'/);
 });

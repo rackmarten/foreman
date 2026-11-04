@@ -161,7 +161,7 @@ test("resolveEffort defaults to medium and honors CLAUDE_EFFORT", () => {
 
 test("modelArgs always passes --effort, medium by default", () => {
   assert.deepEqual(modelArgs("claude-opus-5-5", resolveEffort({})), ["--model", "claude-opus-5-5", "--effort", "medium"]);
-  assert.deepEqual(modelArgs("m", resolveEffort({ CLAUDE_EFFORT: "low" })), ["--model", "m", "--effort", "low"]);
+  assert.deepEqual(modelArgs("m", resolveEffort({ CLAUDE_EFFORT: "high" })), ["--model", "m", "--effort", "high"]);
   assert.deepEqual(modelArgs("m"), ["--model", "m", "--effort", DEFAULT_EFFORT]);
 });
 

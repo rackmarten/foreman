@@ -13,8 +13,10 @@ import {
   repeatedFlag,
   resolveProject,
   runOrder,
+  formatTaskLine,
+  reasoningFlag,
 } from "./work.js";
-import type { Project, TaskRelation } from "./pinboard.js";
+import type { Project, Task, TaskRelation } from "./pinboard.js";
 
 function project(overrides: Partial<Project> = {}): Project {
   return {
@@ -203,4 +205,23 @@ test("parseHandoffArgs: no --checklist leaves it out", () => {
   assert.equal(input.checklist, undefined);
   assert.equal(input.completed, "All of it");
   assert.equal(input.estimatedNextEffort, 3);
+});
+
+test("--reasoning takes medium, high or none (none clears), and rejects anything else", () => {
+  assert.equal(reasoningFlag(parseFlags([])), undefined);
+  assert.equal(reasoningFlag(parseFlags(["--reasoning=high"])), "high");
+  assert.equal(reasoningFlag(parseFlags(["--reasoning=medium"])), "medium");
+  assert.equal(reasoningFlag(parseFlags(["--reasoning=none"])), null);
+  assert.throws(() => reasoningFlag(parseFlags(["--reasoning=max"])), /--reasoning must be medium, high or none/);
+});
+
+test("task update --reasoning sets or clears the reasoning effort and leaves --effort as story points", () => {
+  assert.deepEqual(parseUpdateArgs(["5", "--reasoning=high", "--effort=3"]).fields, { estimatedEffort: 3, reasoningEffort: "high" });
+  assert.deepEqual(parseUpdateArgs(["5", "--reasoning=none"]).fields, { reasoningEffort: null });
+});
+
+test("the task line shows reasoning only when the task sets it", () => {
+  const task = { id: 9, status: "queued", priority: 2, taskType: "feature", executorMode: "agent", estimatedEffort: 3, title: "T" } as Task;
+  assert.equal(formatTaskLine(task), "#9  [queued] p2 feature/agent effort:3  T");
+  assert.equal(formatTaskLine({ ...task, reasoningEffort: "high" }), "#9  [queued] p2 feature/agent effort:3 reasoning:high  T");
 });

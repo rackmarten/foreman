@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
@@ -52,6 +53,7 @@ import {
   HANDOFF_SCHEMA,
   handoffInputFields,
   validateRunOptions,
+  attemptStartComment,
   type TimeoutTrackerState,
 } from "./runner.js";
 import { ensureTaskClone, repoWorkdir, taskBranch, TASK_ROOT } from "./workdir.js";
@@ -1393,4 +1395,65 @@ test("stackPromptLines tells a stacked session which PR it builds on, and is emp
   assert.ok(text.includes(`stacked on task ${STACKED.stackOn.taskId}`));
   assert.match(text, /pull\/4/);
   assert.deepEqual(stackPromptLines({ stackOn: null }), []);
+});
+
+test("attemptStartComment records the model and effort the run uses", () => {
+  assert.equal(attemptStartComment(1, 3, "claude-opus-5-5", "high"), "Attempt 1/3 starting (model claude-opus-5-5, effort high).");
+});
+
+function gitLfsAvailable(): boolean {
+  try {
+    execFileSync("git", ["lfs", "version"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The real path: a workspace clone that is behind origin and holds no LFS
+// objects, a task clone made from it, and foreman's own push of a branch that
+// adds a new LFS file. Origin is a local bare repo, which git-lfs serves
+// through its standalone file transfer agent.
+test("a task clone of an LFS repo is current, has real LFS files, and its push uploads new objects", { skip: !gitLfsAvailable() && "git-lfs not installed" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "foreman-lfs-test-"));
+  const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+  const globalConfig = join(root, "gitconfig");
+  writeFileSync(globalConfig, "[user]\n\tname = test\n\temail = test@example.com\n");
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  try {
+    const git = (args: string[], cwd: string): string => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+    // the LFS filters, as the runner image sets them system-wide
+    git(["lfs", "install", "--skip-repo"], root);
+    const origin = join(root, "origin.git");
+    git(["init", "-q", "--bare", "-b", "main", origin], root);
+    const seed = join(root, "seed");
+    git(["clone", "-q", origin, seed], root);
+    git(["lfs", "install", "--local"], seed);
+    writeFileSync(join(seed, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
+    git(["add", "."], seed);
+    git(["commit", "-qm", "initial"], seed);
+    git(["push", "-q", "origin", "HEAD:main"], seed);
+    // the workspace clone stops here: only the initial commit, no LFS objects
+    const workspace = join(root, "workspace");
+    git(["clone", "-q", origin, workspace], root);
+    writeFileSync(join(seed, "art.bin"), "real art\n");
+    git(["add", "."], seed);
+    git(["commit", "-qm", "add art"], seed);
+    git(["push", "-q", "origin", "HEAD:main"], seed);
+
+    const dest = ensureTaskClone({ taskId: 7, repoSlug: "game", sourceRepo: workspace, branch: taskBranch(7), root: join(root, "tasks") });
+    assert.equal(git(["rev-parse", "HEAD"], dest), git(["rev-parse", "main"], origin));
+    assert.equal(readFileSync(join(dest, "art.bin"), "utf8"), "real art\n");
+
+    writeFileSync(join(dest, "new.bin"), "new art\n");
+    git(["add", "."], dest);
+    git(["commit", "-qm", "add new art"], dest);
+    pushTaskBranch(dest, taskBranch(7), false, null);
+    const oid = createHash("sha256").update("new art\n").digest("hex");
+    assert.ok(existsSync(join(origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)), "the push uploaded the new LFS object");
+  } finally {
+    if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
