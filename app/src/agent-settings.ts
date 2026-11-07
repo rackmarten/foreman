@@ -104,6 +104,9 @@ export const DEFAULT_ALLOWED_TOOLS = [
   // discovers it needs mid-task, instead of stopping to ask a human -
   // see runner.ts's relatedRepoLines and work.ts's taskAddRelatedRepo.
   "Bash(work task add-related-repo:*)",
+  // read-only: the weekly rework retro lists the past week's moves into
+  // rework with their reasons and handoffs.
+  "Bash(work journal reworks:*)",
   // read-only CI evidence, so an agent fixing a ci_failed handback
   // can read the run itself. GET only: every mutating form is denied below.
   "Bash(gh run view:*)",

@@ -36,12 +36,16 @@ import {
   listPullRequests,
   listProjects,
   listTasks,
+  listTransitions,
   recordObservation,
   submitHandoff,
   answerAsk,
   createAsk,
   type Actor,
+  type Comment,
+  type Handoff,
   type HandoffInput,
+  type JournalEvent,
   type Project,
   type Task,
   type TaskRelation,
@@ -171,6 +175,11 @@ function usage(): void {
       "    Proxmox host for this task (id from WORK_TASK_ID or the task workdir).",
       "    Refuses without the root-access label, an active unexpired grant and",
       "    the CTID in scope; the host checks the same grant again.",
+      "  work journal reworks [--since=<ISO date|Nd>] [--until=<ISO date>] [--project=<slug|id>]",
+      "    every move into rework in the window (default the past 7 days), newest",
+      "    first: when, from which status, who moved it and why (the journal",
+      "    reason or the comment posted with it), the handoff before it and the",
+      "    task's latest handoff. Read-only; the weekly rework retro reads it.",
       "  work plan sync <project-slug> [--force]",
       "  work usage observe --scope=week|session --percent=<0-100> [--note=<text>]",
       "    I6: record what Claude's own UI currently shows as % remaining for",
@@ -302,6 +311,57 @@ function idFlag(flags: Record<string, string>, name: string): number | undefined
 
 // `work task update`'s flags -> the PATCH body, plus the parent
 // change (undefined: leave alone, null: remove, number: replace).
+// `--since=7d` (days back from now) or an ISO date.
+export function parseSince(value: string | undefined, now = new Date()): Date {
+  const v = value ?? "7d";
+  const days = /^(\d+)d$/.exec(v);
+  if (days) return new Date(now.getTime() - Number(days[1]) * 86_400_000);
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) throw new Error(`--since must be <N>d or an ISO date, got '${v}'`);
+  return d;
+}
+
+const clip = (text: string, max = 600) => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}...` : flat;
+};
+
+// The runner posts its reason as a comment just before it sets the status,
+// so the reason for a move nobody explained in the journal is the last
+// comment at most 10 minutes before it (and a few seconds after, for clock
+// skew between the two calls).
+export function reasonComment(event: JournalEvent, comments: Comment[]): Comment | undefined {
+  const at = Date.parse(event.createdAt);
+  return comments
+    .filter((c) => {
+      const t = Date.parse(c.createdAt);
+      return t <= at + 5_000 && t >= at - 600_000;
+    })
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+    .at(-1);
+}
+
+// One move into rework, as `work journal reworks` prints it. `handoffs` are
+// the task's own, any order.
+export function formatRework(event: JournalEvent, task: Task | undefined, comments: Comment[], handoffs: Handoff[]): string {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const lines = [
+    `${event.createdAt} #${event.taskId} [${event.projectSlug ?? "?"}] ${event.taskTitle ?? ""}`.trimEnd(),
+    `  ${String(payload.from ?? "?")} -> rework by ${event.actorType}:${event.actorName}${task ? `, now ${task.status}` : ""}`,
+  ];
+  const reasons = [payload.repairReason, payload.reason].filter((r): r is string => typeof r === "string");
+  if (reasons.length) lines.push(`  reason: ${reasons.join(", ")}`);
+  const comment = reasonComment(event, comments);
+  if (comment) lines.push(`  comment (${comment.authorName}): ${clip(comment.body)}`);
+  const at = Date.parse(event.createdAt);
+  const byTime = [...handoffs].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  const before = byTime.filter((h) => Date.parse(h.createdAt) <= at).at(-1);
+  if (before?.problems) lines.push(`  problems (handoff before): ${clip(before.problems)}`);
+  const latest = byTime.at(-1);
+  if (latest && latest !== before && latest.completed) lines.push(`  latest handoff, completed: ${clip(latest.completed)}`);
+  return lines.join("\n");
+}
+
 export function parseUpdateArgs(args: string[]): { id: number; fields: UpdateTaskInput; parent: number | null | undefined } {
   const flags = parseFlags(args);
   const id = Number(positionals(args)[0]);
@@ -399,6 +459,29 @@ async function taskList(args: string[]): Promise<void> {
     return;
   }
   for (const task of tasks) console.log(formatTaskLine(task));
+}
+
+async function journalReworks(args: string[]): Promise<void> {
+  const flags = parseFlags(args);
+  const since = parseSince(flags.since);
+  const until = flags.until ? parseSince(flags.until) : undefined;
+  const projectId = flags.project ? resolveProject(await listProjects(), flags.project).id : undefined;
+  const events = (await listTransitions("rework", since, until, projectId)).filter((e) => e.taskId !== null);
+  if (events.length === 0) {
+    console.log(`No task entered rework since ${since.toISOString()}.`);
+    return;
+  }
+  const ids = [...new Set(events.map((e) => e.taskId))];
+  const details = new Map(
+    await Promise.all(
+      ids.map(async (id) => [id, await Promise.all([getTask(id).catch(() => undefined), getComments(id), getTaskHandoffs(id)])] as const),
+    ),
+  );
+  console.log(`${events.length} move(s) into rework across ${ids.length} task(s) since ${since.toISOString()}:\n`);
+  for (const event of events) {
+    const [task, comments, handoffs] = details.get(event.taskId)!;
+    console.log(`${formatRework(event, task, comments, handoffs)}\n`);
+  }
 }
 
 async function taskShow(args: string[]): Promise<void> {
@@ -1051,6 +1134,7 @@ async function main(): Promise<void> {
   if (group === "chat" && action === "watch") return chatWatch(rest);
   if (group === "chat" && action === "daemon") return chatDaemon();
   if (group === "plan" && action === "status") return planStatus();
+  if (group === "journal" && action === "reworks") return journalReworks(rest);
   if (group === "playtest") return playtest([action, ...rest].filter((a): a is string => a !== undefined));
     if (group === "dispatch") return dispatch([action, ...rest].filter((a): a is string => a !== undefined));
 

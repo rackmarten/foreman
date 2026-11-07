@@ -471,6 +471,23 @@ export function getEvents(taskId: number): Promise<TaskEvent[]> {
   return get(`/tasks/${taskId}/events`);
 }
 
+// A row of pinboard's journal (GET /events), which joins the task's title
+// and project slug on.
+export interface JournalEvent extends TaskEvent {
+  projectId: number | null;
+  taskTitle: string | null;
+  projectSlug: string | null;
+}
+
+// Status transitions into `to` journaled in [since, until), newest first.
+// Needs a pinboard with GET /events' since/until/to filters.
+export function listTransitions(to: string, since: Date, until?: Date, projectId?: number): Promise<JournalEvent[]> {
+  const params = new URLSearchParams({ to, since: since.toISOString(), limit: "500" });
+  if (until) params.set("until", until.toISOString());
+  if (projectId !== undefined) params.set("projectId", String(projectId));
+  return get(`/events?${params}`);
+}
+
 export interface ProjectHandoff extends Handoff {
   taskTitle: string;
 }
