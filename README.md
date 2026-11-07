@@ -249,7 +249,14 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   `work task complete <id>` - every write stamps `actorType`/`actorName`
   provenance (`WORK_ACTOR_TYPE`/`WORK_ACTOR_NAME` env vars, default
   `human`/the OS username) onto a `task_events` row, per
-  pinboard-initial-idea.md's "Agent Users / Provenance". Also
+  pinboard-initial-idea.md's "Agent Users / Provenance".
+  `work journal reworks [--since=<Nd|ISO date>] [--until=] [--project=]`
+  lists every move into rework in the window (default 7 days), newest
+  first, with who moved it, the journal reason or the comment posted with
+  it (the runner comments just before it sets the status), the problems of
+  the handoff before it and the task's latest handoff. It is read-only and
+  on the agent allowlist, for a retro task that turns recurring rework
+  causes into rules. Also
   `work plan sync <project-slug> [--force]`, which writes a minimal
   generated `PLAN.md` (current task, open tasks, latest handoff - nothing
   private) into that project's own repo under

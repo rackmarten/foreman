@@ -15,8 +15,11 @@ import {
   runOrder,
   formatTaskLine,
   reasoningFlag,
+  formatRework,
+  parseSince,
+  reasonComment,
 } from "./work.js";
-import type { Project, Task, TaskRelation } from "./pinboard.js";
+import type { Comment, Handoff, JournalEvent, Project, Task, TaskRelation } from "./pinboard.js";
 
 function project(overrides: Partial<Project> = {}): Project {
   return {
@@ -224,4 +227,70 @@ test("the task line shows reasoning only when the task sets it", () => {
   const task = { id: 9, status: "queued", priority: 2, taskType: "feature", executorMode: "agent", estimatedEffort: 3, title: "T" } as Task;
   assert.equal(formatTaskLine(task), "#9  [queued] p2 feature/agent effort:3  T");
   assert.equal(formatTaskLine({ ...task, reasoningEffort: "high" }), "#9  [queued] p2 feature/agent effort:3 reasoning:high  T");
+});
+
+const reworkEvent: JournalEvent = {
+  id: 9,
+  taskId: 42,
+  projectId: 1,
+  eventType: "pipeline",
+  actorType: "agent",
+  actorName: "foreman-pipeline",
+  payload: { from: "awaiting_ci", to: "rework", repairReason: "ci_failed" },
+  createdAt: "2026-11-05T10:00:00.000Z",
+  taskTitle: "Fix the thing",
+  projectSlug: "media",
+};
+
+function comment(createdAt: string, body: string): Comment {
+  return { id: 1, taskId: 42, authorType: "agent", authorName: "foreman-runner", body, createdAt };
+}
+
+function handoff(createdAt: string, fields: Partial<Handoff>): Handoff {
+  return {
+    id: 1, taskId: 42, agentId: null, completed: null, changed: null, verified: null, problems: null,
+    discovered: null, next: null, estimatedNextEffort: null, costUsd: null, durationMs: null, numTurns: null,
+    permissionDenials: null, createdAt, ...fields,
+  };
+}
+
+test("parseSince reads <N>d back from now and ISO dates, default 7 days", () => {
+  const now = new Date("2026-11-08T07:00:00Z");
+  assert.equal(parseSince(undefined, now).toISOString(), "2026-11-01T07:00:00.000Z");
+  assert.equal(parseSince("1d", now).toISOString(), "2026-11-07T07:00:00.000Z");
+  assert.equal(parseSince("2026-11-02", now).toISOString(), "2026-11-02T00:00:00.000Z");
+  assert.throws(() => parseSince("last week", now), /--since must be/);
+});
+
+test("reasonComment picks the last comment just before the move, not a later rework note", () => {
+  const comments = [
+    comment("2026-11-05T09:00:00.000Z", "too early"),
+    comment("2026-11-05T09:59:58.000Z", "CI failed: lint"),
+    comment("2026-11-05T12:00:00.000Z", "operator: try again with X"),
+  ];
+  assert.equal(reasonComment(reworkEvent, comments)?.body, "CI failed: lint");
+  assert.equal(reasonComment(reworkEvent, [comments[0]]), undefined);
+});
+
+test("formatRework prints the move, its reason, the handoff before it and the latest one", () => {
+  const text = formatRework(
+    reworkEvent,
+    { id: 42, status: "done" } as Task,
+    [comment("2026-11-05T09:59:58.000Z", "CI failed:\n lint")],
+    [
+      handoff("2026-11-06T10:00:00.000Z", { completed: "fixed lint, added a rule" }),
+      handoff("2026-11-05T09:50:00.000Z", { problems: "eslint not installed" }),
+    ],
+  );
+  assert.equal(
+    text,
+    [
+      "2026-11-05T10:00:00.000Z #42 [media] Fix the thing",
+      "  awaiting_ci -> rework by agent:foreman-pipeline, now done",
+      "  reason: ci_failed",
+      "  comment (foreman-runner): CI failed: lint",
+      "  problems (handoff before): eslint not installed",
+      "  latest handoff, completed: fixed lint, added a rule",
+    ].join("\n"),
+  );
 });

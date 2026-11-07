@@ -8,6 +8,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Added
+- `work journal reworks [--since=<Nd|ISO date>] [--until=] [--project=]`
+  lists every move into rework in the window (default the past 7 days) with
+  who moved it, the journal reason or the comment posted with it, the
+  handoff's problems before it and the task's latest handoff. Agent runs may
+  call it (read-only). Needs a pinboard whose `GET /events` takes
+  `since`/`until`/`to`.
 - Task runs use the task's reasoning effort: pinboard's
   `effectiveReasoningEffort` (the task's own, else its project's default),
   else `CLAUDE_EFFORT`, else `medium`. An unknown value logs a warning and
