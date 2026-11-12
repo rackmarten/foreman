@@ -7,6 +7,17 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 
 ## [Unreleased]
 
+### Changed
+- Task runs and chat default to `high` reasoning effort instead of `medium`
+  when neither the task, its project nor `CLAUDE_EFFORT` sets one.
+- `scripts/sync-claude-rules.sh` writes the containers' `CLAUDE.md` as a stub
+  importing `global.md` and `machines/foreman-runner.md` from the
+  workspace's `<org>/claude-config` clone by its container path (found under
+  `FOREMAN_WORKSPACE_DIR` on the host, fast-forwarded non-interactively on
+  each run), so runs get the unattended rules instead of a copy of the
+  operator's interactive `CLAUDE.md`. Without the clone it falls back to the
+  old mirror and warns.
+
 ### Added
 - `work journal reworks [--since=<Nd|ISO date>] [--until=] [--project=]`
   lists every move into rework in the window (default the past 7 days) with

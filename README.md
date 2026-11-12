@@ -442,7 +442,7 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   `CLAUDE_MODEL`, else `claude-opus-5-5`. Effort: the task's
   `effectiveReasoningEffort` from pinboard (its own `reasoningEffort`, else
   its project's `defaultReasoningEffort`), else `CLAUDE_EFFORT`, else
-  `medium`. Only `medium` and `high` are valid; any other value, from either
+  `high`. Only `medium` and `high` are valid; any other value, from either
   source, logs a warning and falls through to the next one instead of
   failing the run. The attempt's start comment records both ("Attempt 1/3
   starting (model claude-opus-5-5, effort high).") so runs at different
@@ -1437,7 +1437,7 @@ does lack is behaviour, not function, and the state-consolidation child has
 to seed it into the persistent HOME: `settings.json` (notably
 `attribution`/`includeCoAuthoredBy` off, or runs add Claude trailers to
 commits and PRs, plus permissions), `CLAUDE.md`, `agents/` and `skills/`
-(the shared config from homelab's `claude-config/`), `projects/` (session
+(the shared config from the `claude-config` repo), `projects/` (session
 transcripts, needed to `--resume` a retained session across restarts),
 plus `~/.ssh` and `~/.gitconfig`.
 
@@ -1521,10 +1521,21 @@ contents. It:
   task like #500 can `--resume` its retained session.
 
 **Claude rules mirror.** The bootstrap copied `~/.claude` once,
-so later rule edits never reached the containers. Now four entries are a
-mirror of marek's `~/.claude`: `CLAUDE.md`, `settings.json`, `agents/` and
-`skills/` (including `skills/synced`). Nothing else is mirrored: not the
-login, not `projects/`, `plugins/` or runtime state.
+so later rule edits never reached the containers. Now four entries are kept
+in sync. `CLAUDE.md` is a stub importing `global.md` and
+`machines/foreman-runner.md` from the workspace's `<org>/claude-config`
+clone (the first one, or `RULES_ORG`), by its path inside the containers
+(`/app/workspace/...`). On the host the script finds the clone under
+`FOREMAN_WORKSPACE_DIR` (read from `.env` like `deploy.sh`, default
+`./workspace`) and fast-forwards it first, non-interactively with a 60 s
+timeout. So runs and chat get the rules meant for unattended sessions, not
+the interactive ones (`interactive.md`) marek's own `~/.claude/CLAUDE.md`
+imports. With no clone it warns and mirrors marek's `CLAUDE.md` instead.
+`settings.json`, `agents/` and `skills/` (including `skills/synced`) are a
+mirror of marek's `~/.claude`, symlinks followed, so the agent and skill links
+`claude-config`'s `install.sh foreman` puts there arrive as real files.
+Nothing else is mirrored: not the login, not `projects/`, `plugins/` or
+runtime state.
 `scripts/sync-claude-rules.sh` does it: a dry run by default, `--apply` to
 write. A file that differs is replaced atomically (temp file in the same
 directory, then `mv`), so a claude process starting mid-sync never reads half
@@ -1533,10 +1544,9 @@ from the source is deleted. It never prints file contents, and refuses any
 uid but 1000 and any run with `FOREMAN_SERVICE` set (inside a container).
 It runs every 15 minutes from marek's host crontab
 (`scripts/install-claude-rules-cron.sh`, log `state/logs/sync-claude-rules.log`)
-and on every host `scripts/deploy.sh`. So a shared-rule change flows
-homelab's `claude-config/` -> `sync-claude-config.sh` -> marek's
-`~/.claude` -> the containers within 15 minutes. Edit the rules in
-`claude-config/` (or marek's `~/.claude` for settings.json), never in
+and on every host `scripts/deploy.sh`. So a shared-rule change pushed to
+`claude-config` reaches the containers within 15 minutes. Edit the rules in
+`claude-config` (or marek's `~/.claude` for settings.json), never in
 `state/home/.claude`: the next run overwrites it. Tests:
 `scripts/sync-claude-rules.test.mjs`.
 

@@ -1,6 +1,7 @@
 // Shared model and effort for every `claude` session foreman spawns (task
-// runner and chat) - operator's call (2026-09-27, a past task): Opus 5.5 at
-// medium effort. Effort is always passed explicitly, so a run no longer
+// runner and chat) - operator's call (2026-11-12): Opus 5.5 at high effort,
+// since the weekly budget runs at ~80% with headroom and quality comes first
+// (was medium from 2026-09-27). Effort is always passed explicitly, so a run no longer
 // inherits `effortLevel` from the run user's ~/.claude/settings.json (which
 // on foreman is "high"). Override via CLAUDE_MODEL / CLAUDE_EFFORT without a
 // code change. A pinboard agent row's own model still wins over the default.
@@ -32,13 +33,13 @@ function validEffort(value: string | null | undefined, source: string, warn: War
 // Takes the env as a parameter so tests can pin it: a test run inside a
 // Claude Code session inherits that session's own CLAUDE_EFFORT.
 export function resolveEffort(env: NodeJS.ProcessEnv = process.env, warn: Warn = console.warn): ReasoningEffort {
-  return validEffort(env.CLAUDE_EFFORT, "CLAUDE_EFFORT", warn) ?? "medium";
+  return validEffort(env.CLAUDE_EFFORT, "CLAUDE_EFFORT", warn) ?? "high";
 }
 
 export const DEFAULT_EFFORT = resolveEffort();
 
 // A task run's effort: the task's own effective effort from pinboard (its own
-// value, else its project's default), else CLAUDE_EFFORT, else medium.
+// value, else its project's default), else CLAUDE_EFFORT, else high.
 export function resolveTaskEffort(
   task: { effectiveReasoningEffort?: string | null },
   env: NodeJS.ProcessEnv = process.env,

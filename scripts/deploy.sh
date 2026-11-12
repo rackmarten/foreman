@@ -169,8 +169,8 @@ if [ -z "${FOREMAN_WORKSPACE_DIR:-}" ] && [ -f .env ]; then
   export FOREMAN_WORKSPACE_DIR
 fi
 ./scripts/bootstrap-container-state.sh
-# the containers mirror the operator's CLAUDE.md, settings.json,
-# agents/ and skills/; the cron entry below keeps them in step between deploys.
+# the containers get claude-config's runner rules and the operator's
+# settings.json, agents/ and skills/; the cron entry below keeps them in step between deploys.
 # Optional: a host with no ~/.claude of its own has nothing to
 # mirror, and the containers keep their own.
 CLAUDE_RULES=0

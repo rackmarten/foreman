@@ -37,6 +37,7 @@ function run(f, args = ["--apply"], env = {}) {
       HOME: join(f.root, "seed"),
       APP_DIR: join(f.root, "app"),
       CONTAINER_UID: String(process.getuid()),
+      FOREMAN_WORKSPACE_DIR: "",
       ...env,
     },
   });
@@ -44,10 +45,84 @@ function run(f, args = ["--apply"], env = {}) {
   return { code: r.status, out: r.stdout, err: r.stderr, changes: m ? Number(m[1]) : null };
 }
 
-test("mirrors the four entries and nothing else, then a second run changes nothing", () => {
+function rulesRepo(f, base = join(f.root, "app", "workspace")) {
+  const repo = join(base, "some-org", "claude-config");
+  put(join(repo, "global.md"), "# global\n");
+  put(join(repo, "machines", "foreman-runner.md"), "# runner\n");
+  return repo;
+}
+
+const STUB_GLOBAL = /^@\/app\/workspace\/some-org\/claude-config\/global\.md$/m;
+const STUB_RUNNER = /^@\/app\/workspace\/some-org\/claude-config\/machines\/foreman-runner\.md$/m;
+
+function git(cwd, ...args) {
+  const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { cwd, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+test("with a claude-config clone, CLAUDE.md is a stub importing the runner rules by their container path", () => {
+  const f = fixture();
+  rulesRepo(f);
+  const first = run(f);
+  assert.equal(first.code, 0, first.err);
+  assert.doesNotMatch(first.err, /warning/);
+  const stub = readFileSync(join(f.dest, "CLAUDE.md"), "utf8");
+  assert.match(stub, STUB_GLOBAL);
+  assert.match(stub, STUB_RUNNER);
+  assert.doesNotMatch(stub, /# rules/);
+  assert.equal(readFileSync(join(f.dest, "settings.json"), "utf8"), "{}\n");
+  assert.equal(run(f).changes, 0);
+  rmSync(join(f.src, "CLAUDE.md"));
+  assert.equal(run(f).changes, 0, "marek's CLAUDE.md is not needed in stub mode");
+});
+
+test("a moved workspace (FOREMAN_WORKSPACE_DIR) is found on the host, and the stub still uses the container path", () => {
+  const f = fixture();
+  const moved = join(f.root, "elsewhere");
+  rulesRepo(f, moved);
+  const r = run(f, ["--apply"], { FOREMAN_WORKSPACE_DIR: moved });
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.err, /warning/);
+  assert.match(readFileSync(join(f.dest, "CLAUDE.md"), "utf8"), STUB_GLOBAL);
+});
+
+test("the clone is fast-forwarded on --apply, never on a dry run", () => {
+  const f = fixture();
+  const upstream = join(f.root, "upstream");
+  rulesRepo(f, upstream);
+  const src = join(upstream, "some-org", "claude-config");
+  git(src, "init", "-q");
+  git(src, "add", ".");
+  git(src, "commit", "-qm", "one");
+  const clone = join(f.root, "app", "workspace", "some-org", "claude-config");
+  mkdirSync(dirname(clone), { recursive: true });
+  git(f.root, "clone", "-q", src, clone);
+  put(join(src, "global.md"), "# global v2\n");
+  git(src, "commit", "-qam", "two");
+  run(f, []);
+  assert.equal(readFileSync(join(clone, "global.md"), "utf8"), "# global\n");
+  const r = run(f);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(join(clone, "global.md"), "utf8"), "# global v2\n");
+});
+
+test("a stub replaces a previously mirrored CLAUDE.md, and a dry run leaves it alone", () => {
+  const f = fixture();
+  run(f);
+  rulesRepo(f);
+  const dry = run(f, []);
+  assert.match(dry.out, /~ CLAUDE\.md/);
+  assert.equal(readFileSync(join(f.dest, "CLAUDE.md"), "utf8"), "# rules\n");
+  assert.equal(run(f).changes, 1);
+  assert.match(readFileSync(join(f.dest, "CLAUDE.md"), "utf8"), STUB_RUNNER);
+});
+
+test("without a claude-config clone: mirrors the four entries and nothing else, with a warning, then a second run changes nothing", () => {
   const f = fixture();
   const first = run(f);
   assert.equal(first.code, 0, first.err);
+  assert.match(first.err, /no claude-config clone/);
   assert.ok(first.changes > 0);
   assert.equal(readFileSync(join(f.dest, "CLAUDE.md"), "utf8"), "# rules\n");
   assert.ok(existsSync(join(f.dest, "skills", "synced", "dataviz", "SKILL.md")));
