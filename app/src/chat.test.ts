@@ -154,13 +154,13 @@ test("resolvePersona falls back to DEFAULT_EFFORT when the thread has none", () 
   assert.equal(persona.effort, DEFAULT_EFFORT);
 });
 
-test("resolveEffort defaults to medium and honors CLAUDE_EFFORT", () => {
-  assert.equal(resolveEffort({}), "medium");
-  assert.equal(resolveEffort({ CLAUDE_EFFORT: "high" }), "high");
+test("resolveEffort defaults to high and honors CLAUDE_EFFORT", () => {
+  assert.equal(resolveEffort({}), "high");
+  assert.equal(resolveEffort({ CLAUDE_EFFORT: "medium" }), "medium");
 });
 
-test("modelArgs always passes --effort, medium by default", () => {
-  assert.deepEqual(modelArgs("claude-opus-5-5", resolveEffort({})), ["--model", "claude-opus-5-5", "--effort", "medium"]);
+test("modelArgs always passes --effort, high by default", () => {
+  assert.deepEqual(modelArgs("claude-opus-5-5", resolveEffort({})), ["--model", "claude-opus-5-5", "--effort", "high"]);
   assert.deepEqual(modelArgs("m", resolveEffort({ CLAUDE_EFFORT: "high" })), ["--model", "m", "--effort", "high"]);
   assert.deepEqual(modelArgs("m"), ["--model", "m", "--effort", DEFAULT_EFFORT]);
 });

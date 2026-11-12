@@ -43,13 +43,14 @@ test("mutating gh commands stay denied", () => {
   assert.ok(denied("git push origin HEAD"));
 });
 
-test("resolveTaskEffort: the task's effort wins, then CLAUDE_EFFORT, then medium", () => {
+test("resolveTaskEffort: the task's effort wins, then CLAUDE_EFFORT, then high", () => {
   const warnings: string[] = [];
   const warn = (m: string) => warnings.push(m);
   assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "high" }, { CLAUDE_EFFORT: "medium" }, warn), "high");
   assert.equal(resolveTaskEffort({ effectiveReasoningEffort: null }, { CLAUDE_EFFORT: "high" }, warn), "high");
   assert.equal(resolveTaskEffort({}, { CLAUDE_EFFORT: "high" }, warn), "high");
-  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: null }, {}, warn), "medium");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: null }, {}, warn), "high");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "medium" }, {}, warn), "medium");
   assert.deepEqual(warnings, []);
 });
 
@@ -57,8 +58,8 @@ test("resolveTaskEffort warns and falls back on an unknown value instead of fail
   const warnings: string[] = [];
   const warn = (m: string) => warnings.push(m);
   assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "max" as never }, { CLAUDE_EFFORT: "high" }, warn), "high");
-  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "max" as never }, { CLAUDE_EFFORT: "low" }, warn), "medium");
-  assert.equal(resolveEffort({ CLAUDE_EFFORT: "turbo" }, warn), "medium");
+  assert.equal(resolveTaskEffort({ effectiveReasoningEffort: "max" as never }, { CLAUDE_EFFORT: "low" }, warn), "high");
+  assert.equal(resolveEffort({ CLAUDE_EFFORT: "turbo" }, warn), "high");
   assert.equal(warnings.length, 4);
   assert.match(warnings[0], /unknown task effort 'max'/);
   assert.match(warnings[2], /unknown CLAUDE_EFFORT effort 'low'/);

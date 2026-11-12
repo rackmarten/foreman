@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 #
 # mirror the operator's Claude rules into the
-# containers' HOME, so an edit to marek's ~/.claude reaches the runners and
-# chat without a re-bootstrap. Exactly four entries are mirrored:
+# containers' HOME, so an edit reaches the runners and chat without a
+# re-bootstrap. Exactly four entries are written into
+# $APP_DIR/state/home/.claude:
 #
-#   CLAUDE.md, settings.json, agents/, skills/ (including skills/synced)
+#   CLAUDE.md      a stub importing claude-config's global.md and
+#                  machines/foreman-runner.md from the workspace's
+#                  <org>/claude-config clone, by its path inside the
+#                  containers (/app/workspace/...), so they get the
+#                  unattended rules, not the interactive ones marek's own
+#                  ~/.claude/CLAUDE.md imports. The clone is fast-forwarded
+#                  first. With no clone, marek's CLAUDE.md is mirrored
+#                  instead, with a warning.
+#   settings.json, agents/, skills/ (including skills/synced)
+#                  mirrored from ${SEED_HOME:-$HOME}/.claude, symlinks
+#                  followed.
 #
-# from ${SEED_HOME:-$HOME}/.claude into $APP_DIR/state/home/.claude. Nothing
-# else: no credentials, projects/, plugins/ or runtime state.
+# Nothing else: no credentials, projects/, plugins/ or runtime state.
 #
 # A file that differs is replaced atomically (temp file in the same directory,
 # then mv), so a claude process starting mid-sync never reads half a file.
@@ -29,6 +39,10 @@
 #   SEED_HOME       whose ~/.claude is the source (default: $HOME)
 #   APP_DIR         the checkout holding state/ (default: this script's repo)
 #   CONTAINER_UID   the only uid allowed to run this (default: 1000)
+#   FOREMAN_WORKSPACE_DIR  host side of the containers' /app/workspace mount
+#                   (default: the value in $APP_DIR/.env, else ./workspace,
+#                   relative to $APP_DIR, as in docker-compose.yml)
+#   RULES_ORG       which <org>/claude-config to use (default: the first one)
 
 set -euo pipefail
 
@@ -130,7 +144,43 @@ if [ "$APPLY" = 1 ] && [ ! -d "$DEST" ]; then
   mkdir -p "$DEST"
   chmod 700 "$DEST"
 fi
-for f in CLAUDE.md settings.json; do
+# The containers mount the workspace at /app/workspace (docker-compose.yml);
+# the host side moves with FOREMAN_WORKSPACE_DIR, read from .env like deploy.sh.
+CONTAINER_WORKSPACE=/app/workspace
+if [ -z "${FOREMAN_WORKSPACE_DIR:-}" ] && [ -f "$APP_DIR/.env" ]; then
+  FOREMAN_WORKSPACE_DIR="$(sed -n 's/^FOREMAN_WORKSPACE_DIR=//p' "$APP_DIR/.env" | tail -n 1)"
+fi
+host_ws="${FOREMAN_WORKSPACE_DIR:-./workspace}"
+[[ "$host_ws" == /* ]] || host_ws="$APP_DIR/${host_ws#./}"
+rules_org="${RULES_ORG:-}"
+if [ -z "$rules_org" ]; then
+  for d in "$host_ws"/*/claude-config; do
+    if [ -d "$d" ]; then rules_org="$(basename "$(dirname "$d")")"; break; fi
+  done
+fi
+rules_host="$host_ws/${rules_org:-<org>}/claude-config"
+# Pull before checking, so a file renamed upstream falls back this run rather
+# than leaving a stub that imports nothing. Never prompts or hangs a deploy.
+if [ "$APPLY" = 1 ] && [ -n "$rules_org" ] && [ -d "$rules_host/.git" ]; then
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" \
+    timeout 60 git -C "$rules_host" pull -q --ff-only \
+    || echo "warning: could not fast-forward ${rules_host}, using it as it is" >&2
+fi
+if [ -n "$rules_org" ] && [ -f "$rules_host/global.md" ] && [ -f "$rules_host/machines/foreman-runner.md" ]; then
+  rules_container="$CONTAINER_WORKSPACE/$rules_org/claude-config"
+  stub="$(mktemp)"
+  trap 'rm -f "$stub"' EXIT
+  printf '%s\n' \
+    "<!-- Written by foreman's scripts/sync-claude-rules.sh. Edit claude-config, not this file. -->" \
+    "@${rules_container}/global.md" \
+    "@${rules_container}/machines/foreman-runner.md" > "$stub"
+  sync_file "$stub" "$DEST/CLAUDE.md"
+  mirrored=(settings.json)
+else
+  echo "warning: no claude-config clone with global.md and machines/foreman-runner.md at ${rules_host}; mirroring ${SRC}/CLAUDE.md instead, whose imports may not resolve inside the containers" >&2
+  mirrored=(CLAUDE.md settings.json)
+fi
+for f in "${mirrored[@]}"; do
   if [ -f "$SRC/$f" ]; then
     sync_file "$SRC/$f" "$DEST/$f"
   elif [ -e "$DEST/$f" ] || [ -L "$DEST/$f" ]; then
