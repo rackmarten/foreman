@@ -63,7 +63,7 @@ import {
 } from "./chat.js";
 import { askQuestion, DEFAULT_ASK_OPTIONS, type AskStructure } from "./ask.js";
 import { defaultRootDeps, runRoot } from "./root.js";
-import { PR_SYNC_INTERVAL_MS, pollPullRequests } from "./pull-requests.js";
+import { PR_SYNC_INTERVAL_MS, completeWithPrSync, pollPullRequests } from "./pull-requests.js";
 import { runPlaytest } from "./playtest.js";
 import { isReasoningEffort, REASONING_EFFORTS, type ReasoningEffort } from "./agent-settings.js";
 
@@ -138,6 +138,8 @@ function usage(): void {
       "                          [--summary=<markdown TL;DR, at most 5 lines>]",
       "                          [--checklist=<item to check by hand>]... (repeatable)",
       "  work task complete <id>",
+      "    Records a linked PR that GitHub already has merged or closed (gh pr view)",
+      "    before completing, so pinboard's open-PR refusal only hits a PR still open.",
       "  work task ask <id> <question...> [--wait-seconds=90] [--poll-interval-seconds=5]",
       "    I9: for a session's own use while it's running (Bash-allowed, see",
       "    agent-settings.ts) - posts the question to the task's session chat",
@@ -925,7 +927,8 @@ async function taskComplete(args: string[]): Promise<void> {
     usage();
     process.exit(2);
   }
-  const task = await completeTask(id, currentActor());
+  const { result: task, notes } = await completeWithPrSync(id, () => completeTask(id, currentActor()));
+  for (const note of notes) console.log(note);
   console.log(formatTaskLine(task));
 }
 

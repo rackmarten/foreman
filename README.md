@@ -246,7 +246,10 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   [--problems=] [--discovered=] [--next=] [--effort=] [--cost=]
   [--duration-ms=] [--turns=] [--agent=<agentName>] [--summary=]
   [--checklist=<item>]...` (`--checklist` is repeatable, one item each),
-  `work task complete <id>` - every write stamps `actorType`/`actorName`
+  `work task complete <id>` (first asks GitHub, via `gh pr view`, about
+  every linked PR pinboard still lists as open and records a merge or close
+  GitHub already has, so a PR merged outside foreman doesn't need a forced
+  close before the next PR sync) - every write stamps `actorType`/`actorName`
   provenance (`WORK_ACTOR_TYPE`/`WORK_ACTOR_NAME` env vars, default
   `human`/the OS username) onto a `task_events` row, per
   pinboard-initial-idea.md's "Agent Users / Provenance".
