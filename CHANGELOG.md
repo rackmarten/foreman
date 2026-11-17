@@ -91,6 +91,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- `work task complete` no longer needs a forced close right after a PR was
+  merged outside foreman (`gh pr merge`) while pinboard still lists it open.
+  It asks GitHub about each PR row still open, records a merge or close
+  GitHub already has (printing a note per synced PR), then completes. A PR
+  GitHub still has open keeps pinboard's refusal; when `gh` is missing or
+  fails, the refusal says why.
 - A retained workdir that could not be rebased onto main was deleted with
   any commits never pushed in it. Before the runner drops a workdir (rebase
   failure, a crashed attempt's leftover clone, a timeout or forced stop), it
