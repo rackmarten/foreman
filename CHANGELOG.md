@@ -91,6 +91,9 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- A session-limit reset time printed without minutes (`resets 7pm (UTC)`,
+  also `7 pm`) is read as that time instead of falling back to a 5h wait.
+  A reset in a zone other than UTC still takes the 5h fallback.
 - `work task complete` no longer needs a forced close right after a PR was
   merged outside foreman (`gh pr merge`) while pinboard still lists it open.
   It asks GitHub about each PR row still open, records a merge or close

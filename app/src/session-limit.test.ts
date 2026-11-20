@@ -42,6 +42,51 @@ test("handles pm and the 12am/12pm edges", () => {
   assert.equal(parseSessionLimitReset("resets 12:15pm (UTC)", now)?.toISOString(), "2026-09-16T12:15:00.000Z");
 });
 
+// A real run printed the hour alone ("resets 7pm (UTC)"), which used to miss
+// the pattern and fall back to a full 5h wait past the actual reset.
+test("parses reset times without minutes, with a space before am/pm, and on a 24h clock", () => {
+  const now = new Date("2026-11-20T18:09:00.000Z");
+  assert.equal(parseSessionLimitReset("resets 7pm (UTC)", now)?.toISOString(), "2026-11-20T19:00:00.000Z");
+  assert.equal(parseSessionLimitReset("resets 7 pm (UTC)", now)?.toISOString(), "2026-11-20T19:00:00.000Z");
+  assert.equal(parseSessionLimitReset("resets 12am (UTC)", now)?.toISOString(), "2026-11-21T00:00:00.000Z");
+  assert.equal(parseSessionLimitReset("resets 1:40am (UTC)", now)?.toISOString(), "2026-11-21T01:40:00.000Z");
+  assert.equal(parseSessionLimitReset("resets 19:00 (UTC)", now)?.toISOString(), "2026-11-20T19:00:00.000Z");
+});
+
+test("the real minute-less error resolves to the reset, not the 5h fallback", () => {
+  const now = new Date("2026-11-20T18:09:00.000Z");
+  const result = classifyAttemptFailure({
+    error: "session ended with is_error: You've hit your session limit · resets 7pm (UTC)",
+    costUsd: 0,
+    capUsd: 2,
+    now,
+  });
+  assert.equal(result.kind === "session_limit" && result.resetsAt.toISOString(), "2026-11-20T19:00:00.000Z");
+});
+
+test("rejects reset times it cannot read safely", () => {
+  const now = new Date("2026-11-20T18:09:00.000Z");
+  // A bare hour is ambiguous between 12h and 24h clocks.
+  assert.equal(parseSessionLimitReset("resets 7 (UTC)", now), null);
+  assert.equal(parseSessionLimitReset("resets 13pm (UTC)", now), null);
+  assert.equal(parseSessionLimitReset("resets 24:00 (UTC)", now), null);
+  assert.equal(parseSessionLimitReset("resets 7:75pm (UTC)", now), null);
+  // Another zone must not be read as UTC.
+  assert.equal(parseSessionLimitReset("resets 7pm (Europe/Prague)", now), null);
+  assert.equal(parseSessionLimitReset("resets 7pm (PST)", now), null);
+});
+
+test("an unparsable reset time still falls back to a full window", () => {
+  const now = new Date("2026-11-20T18:09:00.000Z");
+  const result = classifyAttemptFailure({
+    error: "You've hit your session limit · resets 7pm (Europe/Prague)",
+    costUsd: 0,
+    capUsd: 2,
+    now,
+  });
+  assert.equal(result.kind === "session_limit" && result.resetsAt.getTime(), now.getTime() + 5 * 60 * 60 * 1000);
+});
+
 test("returns null when there is no reset time to read", () => {
   assert.equal(parseSessionLimitReset("something else entirely", new Date()), null);
 });

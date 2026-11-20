@@ -33,13 +33,17 @@ export type FailureClass =
 
 // Matches the message Claude prints when the 5h window is spent, e.g.
 //   You've hit your session limit · resets 1:40am (UTC)
+//   You've hit your session limit · resets 7pm (UTC)
 // Detection and time extraction are deliberately separate: if Claude rewords
 // the sentence but keeps the shape, we still want to recognise the class even
 // when the timestamp no longer parses, because classifying it as retryable is
 // the expensive mistake. Apostrophes vary (straight vs curly) so the
 // detection pattern avoids them entirely.
 const SESSION_LIMIT_PATTERN = /hit\s+your\s+session\s+limit/i;
-const RESET_TIME_PATTERN = /resets\s+(\d{1,2}):(\d{2})\s*(am|pm)?\s*\(?UTC\)?/i;
+// Minutes are optional ("7pm", "7 pm"), but a bare hour with neither minutes
+// nor am/pm is rejected as ambiguous. Only UTC is read: a reset in any other
+// zone does not match, so it takes the 5h fallback instead of being misread.
+const RESET_TIME_PATTERN = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(?UTC\)?/i;
 
 // The error text gives a wall-clock time with no date ("resets 1:40am
 // (UTC)"), so it has to be resolved against `now`: the next occurrence of
@@ -49,8 +53,9 @@ export function parseSessionLimitReset(error: string, now: Date): Date | null {
   if (!match) return null;
 
   let hour = Number(match[1]);
-  const minute = Number(match[2]);
   const meridiem = match[3]?.toLowerCase();
+  if (match[2] === undefined && !meridiem) return null;
+  const minute = Number(match[2] ?? 0);
 
   if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute > 59) return null;
   if (meridiem) {
