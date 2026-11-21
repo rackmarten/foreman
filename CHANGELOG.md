@@ -97,6 +97,9 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- `work` exits quietly (exit code 0) when the reader of its stdout closes
+  early, as in `work task show <id> | head -1`, instead of crashing with an
+  unhandled `write EPIPE` stack trace.
 - A session-limit reset time printed without minutes (`resets 7pm (UTC)`,
   also `7 pm`) is read as that time instead of falling back to a 5h wait.
   A reset in a zone other than UTC still takes the 5h fallback.

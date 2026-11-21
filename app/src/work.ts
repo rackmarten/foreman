@@ -1209,7 +1209,16 @@ async function main(): Promise<void> {
 // and main() silently never runs.
 const isMainModule =
   process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+// A reader that closes early (`work task show 7 | head -1`) turns the next
+// stdout write into an EPIPE error event, which crashed with a stack trace.
+// The reader has all it wanted, so stop quietly; any other error still throws.
+function exitOnEpipe(err: NodeJS.ErrnoException): void {
+  if (err.code === "EPIPE") process.exit(0);
+  throw err;
+}
+
 if (isMainModule) {
+  process.stdout.on("error", exitOnEpipe);
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
