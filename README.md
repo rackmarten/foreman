@@ -230,7 +230,13 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   Check a host has it with `ssh <host> ssh-keygen -lf ~/.ssh/authorized_keys`.
 - **The `work` CLI** (`app/`) - a client for pinboard's API. Read-only:
   `work task list [--project=] [--status=] [--type=] [--executor=]`,
-  `work task show <id>`, `work task next`. `task list` also takes
+  `work task show <id>`, `work task next`, `work now [--json]`. `work now`
+  reads pinboard's `GET /api/now` and prints every active story grouped
+  by project, stories waiting on a human first: progress, interactive
+  cost, what is running, what waits (a review, an open ask, a human task),
+  the next child and the latest interactive sessions, then a "Can
+  archive:" list of sessions whose stories are all done or rejected, cut
+  to fit a phone-width terminal; `--json` prints the response as-is. `task list` also takes
   `--parent=<id>` and `--label=<name>` (the label filter runs client-side).
   On a story, `task show` lists its children in run order (a child after
   every sibling it `depends_on`, then by priority) with status, executor

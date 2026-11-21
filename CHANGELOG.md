@@ -19,6 +19,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   old mirror and warns.
 
 ### Added
+- `work now [--json]` lists every active story by project, waiting-on-a-human
+  first: progress, interactive cost, running children, what waits on a human
+  (review, open ask, human task), the next child and the latest interactive
+  sessions, then the sessions that can be archived (every story done or
+  rejected), in a compact listing that fits a phone-width terminal. `--json`
+  prints pinboard's response as-is. Needs a pinboard with `GET /api/now`.
 - `work journal reworks [--since=<Nd|ISO date>] [--until=] [--project=]`
   lists every move into rework in the window (default the past 7 days) with
   who moved it, the journal reason or the comment posted with it, the
@@ -91,6 +97,9 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   a slow runner is no longer read as a CI failure.
 
 ### Fixed
+- `work` exits quietly (exit code 0) when the reader of its stdout closes
+  early, as in `work task show <id> | head -1`, instead of crashing with an
+  unhandled `write EPIPE` stack trace.
 - A session-limit reset time printed without minutes (`resets 7pm (UTC)`,
   also `7 pm`) is read as that time instead of falling back to a 5h wait.
   A reset in a zone other than UTC still takes the 5h fallback.
