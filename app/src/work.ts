@@ -1213,7 +1213,8 @@ const isMainModule =
 // stdout write into an EPIPE error event, which crashed with a stack trace.
 // The reader has all it wanted, so stop quietly; any other error still throws.
 function exitOnEpipe(err: NodeJS.ErrnoException): void {
-  if (err.code === "EPIPE") process.exit(0);
+  // Keeps a failure exit code a command already set.
+  if (err.code === "EPIPE") process.exit(process.exitCode ?? 0);
   throw err;
 }
 

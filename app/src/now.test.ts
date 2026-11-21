@@ -104,7 +104,10 @@ test("formatNow: every line fits the phone width, long titles and paths are cut"
           running: [{ id: 99999, title: long, status: "executing" }],
           waiting: [{ kind: "review", taskId: 99998, title: long }],
           next: { id: 99997, title: long },
-          sessions: [{ sessionId: "abcdef0123456789", cwd: `/srv/${"deep/".repeat(12)}repo`, lastSeenAt: "2026-02-20T12:00:00Z" }],
+          sessions: [
+            { sessionId: "abcdef0123456789", cwd: `/srv/${"deep/".repeat(12)}repo`, lastSeenAt: "2026-02-20T12:00:00Z" },
+            { sessionId: "0011223344556677", cwd: null, lastSeenAt: "2026-02-19T12:00:00Z" },
+          ],
         }),
       ],
     },
@@ -113,6 +116,7 @@ test("formatNow: every line fits the phone width, long titles and paths are cut"
   for (const line of out.split("\n")) assert.ok([...line].length <= NOW_WIDTH, `too wide: '${line}'`);
   assert.match(out, /^ {2}#10 A very long.*… \(3\/7\) \$123\.46$/m);
   assert.match(out, /session abcdef01 …(deep\/)+repo \(9d ago\)$/m);
+  assert.match(out, /session 00112233 \? \(10d ago\)$/m);
 });
 
 test("truncate and ago", () => {

@@ -29,7 +29,8 @@ export function ago(iso: string, now: Date): string {
 }
 
 // A long path keeps its tail (the part that names the repo), cut from the left.
-function shortPath(cwd: string, max: number, home: string | undefined): string {
+function shortPath(cwd: string | null, max: number, home: string | undefined): string {
+  if (!cwd) return "?";
   const path = home && (cwd === home || cwd.startsWith(`${home}/`)) ? `~${cwd.slice(home.length)}` : cwd;
   return path.length > max ? `…${path.slice(path.length - max + 1)}` : path;
 }

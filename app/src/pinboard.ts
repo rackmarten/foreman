@@ -851,7 +851,7 @@ export interface NowStory {
   waiting: { kind: "human" | "ask" | "review"; taskId: number; title: string; askId?: number; question?: string }[];
   next: { id: number; title: string } | null;
   // Newest first, at most 3.
-  sessions: { sessionId: string; cwd: string; lastSeenAt: string }[];
+  sessions: { sessionId: string; cwd: string | null; lastSeenAt: string }[];
   interactiveCostUsd: number;
   lastActivityAt: string | null;
 }
@@ -860,7 +860,7 @@ export interface NowStory {
 // be archived. Newest first.
 export interface NowFinishedSession {
   sessionId: string;
-  cwd: string;
+  cwd: string | null;
   lastSeenAt: string;
   stories: { id: number; title: string; status: string }[];
 }
