@@ -19,6 +19,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
   old mirror and warns.
 
 ### Added
+- `work now [--json]` lists every active story by project, waiting-on-a-human
+  first: progress, interactive cost, running children, what waits on a human
+  (review, open ask, human task), the next child and the latest interactive
+  sessions, then the sessions that can be archived (every story done or
+  rejected), in a compact listing that fits a phone-width terminal. `--json`
+  prints pinboard's response as-is. Needs a pinboard with `GET /api/now`.
 - `work journal reworks [--since=<Nd|ISO date>] [--until=] [--project=]`
   lists every move into rework in the window (default the past 7 days) with
   who moved it, the journal reason or the comment posted with it, the

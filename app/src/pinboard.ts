@@ -838,6 +838,44 @@ export function getPlanNext(licenseId?: number, override = false): Promise<PlanN
   return get(`/plan/next${planQuery(licenseId, override)}`);
 }
 
+// GET /now: every active story with what is running, what waits on a
+// human (review, an open ask, a human-executor task), what runs next and its
+// latest interactive sessions. `work now` prints it.
+export interface NowStory {
+  id: number;
+  title: string;
+  status: string;
+  project: { id: number; slug: string; name: string };
+  progress: { done: number; total: number };
+  running: { id: number; title: string; status: string }[];
+  waiting: { kind: "human" | "ask" | "review"; taskId: number; title: string; askId?: number; question?: string }[];
+  next: { id: number; title: string } | null;
+  // Newest first, at most 3.
+  sessions: { sessionId: string; cwd: string; lastSeenAt: string }[];
+  interactiveCostUsd: number;
+  lastActivityAt: string | null;
+}
+
+// An interactive session whose stories are all done or rejected, so it can
+// be archived. Newest first.
+export interface NowFinishedSession {
+  sessionId: string;
+  cwd: string;
+  lastSeenAt: string;
+  stories: { id: number; title: string; status: string }[];
+}
+
+export interface NowResponse {
+  generatedAt: string;
+  stories: NowStory[];
+  // Optional so an older pinboard parses.
+  finishedSessions?: NowFinishedSession[];
+}
+
+export function getNow(): Promise<NowResponse> {
+  return get("/now");
+}
+
 function planQuery(licenseId: number | undefined, override: boolean): string {
   const params = new URLSearchParams();
   if (licenseId !== undefined) params.set("licenseId", String(licenseId));
