@@ -1166,7 +1166,7 @@ async function runOneAttempt(
   // this used to throw straight out of runOneAttempt on a git
   // failure (e.g. a stale worktree/branch left by an interrupted earlier
   // attempt) - runTask's caller has no catch around this call, so the whole
-  // task was left stuck on "executing" forever with no failure comment ever
+  // task was left stuck on "in_progress" forever with no failure comment ever
   // posted. Fold any setup failure into a normal failed-attempt outcome
   // instead, so the existing retry/rework handling in runTask's `!outcome.ok`
   // branch takes over exactly as it does for a failed claude run.
@@ -1884,6 +1884,63 @@ export function decideNoCommitOutcome(
   };
 }
 
+// The statuses a task is still being worked in. `executing` and `handoff`
+// are what a pinboard from before the status model change reports for the
+// same state (pinboard and foreman deploy separately); drop them once every
+// pinboard has the change.
+export const STILL_RUNNING_STATUSES: readonly string[] = ["in_progress", "executing", "handoff"];
+
+export interface SettleDeps {
+  getStatus: (taskId: number) => Promise<string>;
+  setStatus: (taskId: number, status: string) => Promise<unknown>;
+  addComment: (taskId: number, actor: Actor, body: string) => Promise<unknown>;
+}
+
+const SETTLE_DEPS: SettleDeps = {
+  getStatus: async (taskId) => (await getTask(taskId)).status,
+  setStatus: setTaskStatus,
+  addComment,
+};
+
+// Once a session has ended, no path may leave its task in in_progress: each
+// outcome moves it on (awaiting_ci, review, rework, needs_input, queued, or
+// done/rejected when the session said so). A handoff no longer moves the
+// task, so a step that throws half-way (pinboard mid-restart, a push that
+// fails after the PR exists) would otherwise leave it looking like a run
+// that nobody is running. This runs the outcome's own handling, then checks:
+// if that threw and the task did not get anywhere, or the task is still in a
+// running status, it is parked in rework with a comment saying why. A task
+// that did move on is left alone even when a later step (a comment) threw.
+export async function settleAfterSession(
+  taskId: number,
+  actor: Actor,
+  settle: () => Promise<void>,
+  deps: SettleDeps = SETTLE_DEPS,
+): Promise<void> {
+  let failure: unknown = null;
+  try {
+    await settle();
+  } catch (err) {
+    failure = err ?? new Error("unknown error");
+  }
+  const status = await deps.getStatus(taskId).catch(() => null);
+  const stuck = status === null ? failure !== null : STILL_RUNNING_STATUSES.includes(status);
+  if (!stuck) {
+    if (failure !== null) console.error(`Task ${taskId}: after the session ended: ${failure instanceof Error ? failure.message : String(failure)}`);
+    return;
+  }
+  const why =
+    failure !== null
+      ? `handling the session's outcome failed: ${failure instanceof Error ? failure.message : String(failure)}`
+      : `the task was still '${status}' after the session's outcome was handled`;
+  await deps.addComment(taskId, actor, `The session ended, but ${why}. Parked in rework so it does not sit as a run nobody is running; the comments above say what the session did.`).catch(() => {});
+  await withRetry(() => deps.setStatus(taskId, "rework")).catch((err) =>
+    console.error(`Task ${taskId}: could not park the task in rework after the session ended: ${String(err)}`),
+  );
+  console.log(`Task ${taskId}: left in ${status ?? "an unknown status"} after the session ended (${why}), marked for rework.`);
+  process.exitCode = 1;
+}
+
 // The attempt loop's own safety net (`attempt >= opts.attempts`) only holds
 // if opts.attempts is an actual number - a bad caller passing NaN here
 // (silently produced by a CLI parsing mistake once already, see work.ts's
@@ -1981,7 +2038,7 @@ export const infraCooldowns = new InfraCooldowns();
 // to do) or a per-project/per-license concurrency refusal (no leaseExpiresAt -
 // just "try again shortly"; a lapsed root grant also lands here). When this run has already moved the task off the
 // queue (a retry after attempt 1, or a task not in "queued"), returning on a
-// capacity refusal would strand it in "executing" with no lease, which
+// capacity refusal would strand it in "in_progress" with no lease, which
 // /plan/next never offers again. So requeue it, keeping only the attempts
 // actually spent, and say why. Returns whether it requeued.
 export async function handleClaimRefusal(
@@ -2023,7 +2080,7 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
       `task ${taskId} autonomyLevel is ${task.autonomyLevel} - I4a only runs tasks at or below ${MAX_AUTONOMY_LEVEL}`,
     );
   }
-  if (task.status !== "queued" && task.status !== "executing") {
+  if (task.status !== "queued" && !STILL_RUNNING_STATUSES.includes(task.status)) {
     throw new Error(`task ${taskId} status is '${task.status}', expected 'queued'`);
   }
 
@@ -2345,118 +2402,123 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
       continue;
     }
 
-    const handoff = await submitHandoff(taskId, {
-      ...actor,
-      agentName: actor.actorName,
-      ...handoffInputFields(outcome.handoff),
-      costUsd: String(outcome.totalCostUsd),
-      durationMs: outcome.durationMs,
-      numTurns: outcome.numTurns,
-      permissionDenials: outcome.permissionDenials,
-    });
-    await addComment(taskId, actor, formatHandoffComment(outcome.handoff));
+    // the session is over from here: every way out of this block moves the
+    // task out of in_progress (settleAfterSession checks that it did).
+    await settleAfterSession(taskId, actor, async () => {
+      const handoff = await submitHandoff(taskId, {
+        ...actor,
+        agentName: actor.actorName,
+        ...handoffInputFields(outcome.handoff),
+        costUsd: String(outcome.totalCostUsd),
+        durationMs: outcome.durationMs,
+        numTurns: outcome.numTurns,
+        permissionDenials: outcome.permissionDenials,
+      });
+      await addComment(taskId, actor, formatHandoffComment(outcome.handoff));
 
-    if (!outcome.hasCommits) {
-      // a session that ended on a question nobody answered is
-      // waiting on the operator, not a failed attempt - park it in
-      // needs_input and hand the attempt back.
-      const thread = await getTaskChatThread(taskId);
-      const question = thread ? pendingQuestion(thread, await getChatMessages(thread.id)) : null;
-      if (question !== null) {
-        await setAttemptCount(taskId, attempt - 1);
-        await addComment(taskId, actor, formatNeedsInputComment(question));
-        await advancePipeline(taskId, actor, "needs_input");
-        console.log(`Task ${taskId}: attempt ${attempt} ended on an unanswered question, marked needs_input.`);
-        return;
-      }
-      const decision = decideNoCommitOutcome(
-        task.labels.map((l) => l.name),
-        outcome.handoff,
-      );
-      await addComment(taskId, actor, decision.comment);
-      await setTaskStatus(taskId, decision.to);
-      console.log(`Task ${taskId}: attempt ${attempt} completed with no changes, marked for ${decision.to}.`);
-      return;
-    }
-
-    // A past task follow-up: a related repo (see relatedRepoTargets) commits
-    // on this same branch in its own worktree, so it gets pushed and opened
-    // as its own PR/merge/deploy here too, exactly like this task's own
-    // repo - one task can now land changes across several repos instead of
-    // silently stranding the related-repo commits uncommitted on main (the
-    // a past task bug this whole worktree-per-repo scheme exists to close).
-    const repoTargets = [repoTargetFor(taskId, project), ...outcome.relatedTargets].filter((t) =>
-      branchHasCommits(t.repoPath, outcome.branch),
-    );
-    // the session ends here. Everything after the PR - waiting for
-    // CI, merging, deploying, the healthcheck - is plain work with no
-    // judgement in it, and it used to run inline (mergeAndDeploy), holding
-    // this task's Claude session, its lease and the one agent concurrency
-    // slot for the ten-plus minutes it takes. It is driven off the task's own
-    // status now by foreman-pipeline.service instead (see pipeline.ts), which
-    // is why nothing below waits for any of it.
-    // this used to have no catch of its own, so a push/PR failure
-    // here (found live: a stale --force-with-lease rejection, see
-    // workdir.ts's refreshRemoteBranch) threw straight out of runTask after
-    // the handoff comment had already been posted - the task was left
-    // claiming a completed, correct fix with no PR, no rework status and no
-    // comment explaining why, visible only in this dispatcher's own systemd
-    // journal. The fix itself is real either way; what was missing is a
-    // human-visible trail leading back to it.
-    try {
-      for (const target of repoTargets) {
-        const pr = await pushAndOpenPr(
-          target.repoPath,
-          outcome.branch,
-          task,
-          target.project,
-          outcome.handoff,
-          pushNeedsForce(resume !== undefined, task.repairReason),
-        );
-        if (pr.isNew) {
-          await withPinboardRetry(() => addComment(taskId, actor, `Opened ${pr.url} for review.`));
-          await withPinboardRetry(() =>
-            addPullRequest(taskId, {
-              url: pr.url,
-              repoSlug: basename(target.project.localPath as string),
-              branchName: outcome.branch,
-              attemptNumber: task.attemptCount,
-              baseBranch: pr.base,
-              stackedOnTaskId: pr.stack?.taskId ?? null,
-              stackedOnSha: pr.stack?.sha || null,
-            }),
-          );
-        } else if (pr.pushed) {
-          await withPinboardRetry(() => addComment(taskId, actor, `Pushed additional commits to the existing PR: ${pr.url}`));
+      if (!outcome.hasCommits) {
+        // a session that ended on a question nobody answered is
+        // waiting on the operator, not a failed attempt - park it in
+        // needs_input and hand the attempt back.
+        const thread = await getTaskChatThread(taskId);
+        const question = thread ? pendingQuestion(thread, await getChatMessages(thread.id)) : null;
+        if (question !== null) {
+          await setAttemptCount(taskId, attempt - 1);
+          await addComment(taskId, actor, formatNeedsInputComment(question));
+          await advancePipeline(taskId, actor, "needs_input");
+          console.log(`Task ${taskId}: attempt ${attempt} ended on an unanswered question, marked needs_input.`);
+          return;
         }
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof LeakBlockedError) {
-        await addComment(taskId, actor, formatLeakComment(err.repoSlug, err.result)).catch(() => {});
-        await setTaskStatus(taskId, "rework");
-        console.log(`Task ${taskId}: attempt ${attempt} succeeded but the leak check blocked the push, marked for rework: ${message}`);
+        const decision = decideNoCommitOutcome(
+          task.labels.map((l) => l.name),
+          outcome.handoff,
+        );
+        await addComment(taskId, actor, decision.comment);
+        await setTaskStatus(taskId, decision.to);
+        console.log(`Task ${taskId}: attempt ${attempt} completed with no changes, marked for ${decision.to}.`);
         return;
       }
-      await addComment(
-        taskId,
-        actor,
-        `The fix above is committed in this task's retained workdir, but pushing it and opening its PR failed: ${message}\n\nNothing was lost - the commits are still there for the next attempt to pick up and retry.`,
-      ).catch(() => {});
-      await setTaskStatus(taskId, "rework");
-      console.log(`Task ${taskId}: attempt ${attempt} succeeded but push/PR failed, marked for rework: ${message}`);
-      return;
-    }
 
-    // withRetry because this is the call that decides whether the pipeline
-    // ever picks the task up: losing it would strand a task on `handoff` with
-    // an open PR and nothing watching it (exactly what a past task hit against a
-    // pinboard that was mid-restart). Nothing polls for that, so it is worth
-    // a few retries here.
-    await withRetry(() => advancePipeline(taskId, actor, "awaiting_ci"));
-    console.log(
-      `Task ${taskId}: attempt ${attempt} succeeded, handoff #${handoff.id}, PRs: ${repoTargets.map((t) => basename(t.project.localPath as string)).join(", ")} - handed to the pipeline.`,
-    );
+      // A past task follow-up: a related repo (see relatedRepoTargets) commits
+      // on this same branch in its own worktree, so it gets pushed and opened
+      // as its own PR/merge/deploy here too, exactly like this task's own
+      // repo - one task can now land changes across several repos instead of
+      // silently stranding the related-repo commits uncommitted on main (the
+      // a past task bug this whole worktree-per-repo scheme exists to close).
+      const repoTargets = [repoTargetFor(taskId, project), ...outcome.relatedTargets].filter((t) =>
+        branchHasCommits(t.repoPath, outcome.branch),
+      );
+      // the session ends here. Everything after the PR - waiting for
+      // CI, merging, deploying, the healthcheck - is plain work with no
+      // judgement in it, and it used to run inline (mergeAndDeploy), holding
+      // this task's Claude session, its lease and the one agent concurrency
+      // slot for the ten-plus minutes it takes. It is driven off the task's own
+      // status now by foreman-pipeline.service instead (see pipeline.ts), which
+      // is why nothing below waits for any of it.
+      // this used to have no catch of its own, so a push/PR failure
+      // here (found live: a stale --force-with-lease rejection, see
+      // workdir.ts's refreshRemoteBranch) threw straight out of runTask after
+      // the handoff comment had already been posted - the task was left
+      // claiming a completed, correct fix with no PR, no rework status and no
+      // comment explaining why, visible only in this dispatcher's own systemd
+      // journal. The fix itself is real either way; what was missing is a
+      // human-visible trail leading back to it.
+      try {
+        for (const target of repoTargets) {
+          const pr = await pushAndOpenPr(
+            target.repoPath,
+            outcome.branch,
+            task,
+            target.project,
+            outcome.handoff,
+            pushNeedsForce(resume !== undefined, task.repairReason),
+          );
+          if (pr.isNew) {
+            await withPinboardRetry(() => addComment(taskId, actor, `Opened ${pr.url} for review.`));
+            await withPinboardRetry(() =>
+              addPullRequest(taskId, {
+                url: pr.url,
+                repoSlug: basename(target.project.localPath as string),
+                branchName: outcome.branch,
+                attemptNumber: task.attemptCount,
+                baseBranch: pr.base,
+                stackedOnTaskId: pr.stack?.taskId ?? null,
+                stackedOnSha: pr.stack?.sha || null,
+              }),
+            );
+          } else if (pr.pushed) {
+            await withPinboardRetry(() => addComment(taskId, actor, `Pushed additional commits to the existing PR: ${pr.url}`));
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof LeakBlockedError) {
+          await addComment(taskId, actor, formatLeakComment(err.repoSlug, err.result)).catch(() => {});
+          await setTaskStatus(taskId, "rework");
+          console.log(`Task ${taskId}: attempt ${attempt} succeeded but the leak check blocked the push, marked for rework: ${message}`);
+          return;
+        }
+        await addComment(
+          taskId,
+          actor,
+          `The fix above is committed in this task's retained workdir, but pushing it and opening its PR failed: ${message}\n\nNothing was lost - the commits are still there for the next attempt to pick up and retry.`,
+        ).catch(() => {});
+        await setTaskStatus(taskId, "rework");
+        console.log(`Task ${taskId}: attempt ${attempt} succeeded but push/PR failed, marked for rework: ${message}`);
+        return;
+      }
+
+      // withRetry because this is the call that decides whether the pipeline
+      // ever picks the task up: losing it would strand a task in `in_progress`
+      // with an open PR and nothing watching it (exactly what a past task hit against a
+      // pinboard that was mid-restart). Nothing polls for that, so it is worth
+      // a few retries here.
+      await withRetry(() => advancePipeline(taskId, actor, "awaiting_ci"));
+      console.log(
+        `Task ${taskId}: attempt ${attempt} succeeded, handoff #${handoff.id}, PRs: ${repoTargets.map((t) => basename(t.project.localPath as string)).join(", ")} - handed to the pipeline.`,
+      );
+      return;
+    });
     return;
   }
 }
@@ -2527,7 +2589,7 @@ let lastDispatchReason: string | null = null;
 // is given and reports what it was told when given nothing.
 //
 // inFlightTasks still matters despite pinboard doing the gating: a task's
-// status only flips to "executing" once its claim lands, which happens inside
+// status only flips to "in_progress" once its claim lands, which happens inside
 // runTask, so between starting one here and that claim landing pinboard would
 // still offer the same task (and would not count it against concurrency).
 // Filtering by what is already in flight, and capping at the plan's own
@@ -2537,7 +2599,7 @@ let lastDispatchReason: string | null = null;
 // agents at once whoever owns them; the seat one stops one seat taking the
 // whole allowance. Both count foreman's own in-flight runs rather than
 // pinboard's claimed ones, because a task started here doesn't become
-// "executing" until its claim lands inside runTask.
+// "in_progress" until its claim lands inside runTask.
 //
 // A past task made the seat term real - before it, pinboard reported the same
 // global figure for every license, so it could never bind. Replaced task

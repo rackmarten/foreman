@@ -26,6 +26,8 @@ import {
   DEFAULT_RUN_OPTIONS,
   computeSleepMs,
   decideNoCommitOutcome,
+  settleAfterSession,
+  STILL_RUNNING_STATUSES,
   formatNeedsInputComment,
   dispatchOnce,
   earliestWait,
@@ -979,6 +981,103 @@ test("dispatchOnce does not log a task that is simply another seat's work", { sk
   );
   assert.deepEqual(value.started, [{ taskId: 26803, licenseId: IDLE_SEAT }]);
   assert.equal(logs.filter((l) => l.includes("no eligible agent")).length, 0);
+});
+
+// After a session ends no path may leave the task in_progress.
+function settleFakes(status: string | (() => string)) {
+  const calls = { comments: [] as string[], statuses: [] as string[] };
+  let current = typeof status === "string" ? status : null;
+  const deps = {
+    getStatus: async () => current ?? (status as () => string)(),
+    setStatus: async (_id: number, to: string) => {
+      calls.statuses.push(to);
+      current = to;
+    },
+    addComment: async (_id: number, _actor: unknown, body: string) => {
+      calls.comments.push(body);
+    },
+  };
+  return { calls, deps, move: (to: string) => (current = to) };
+}
+const settleActor = { actorType: "agent" as const, actorName: "foreman-runner" };
+
+async function settling<T>(fn: () => Promise<T>): Promise<T> {
+  const before = process.exitCode;
+  try {
+    return await fn();
+  } finally {
+    process.exitCode = before;
+  }
+}
+
+test("settleAfterSession leaves a task the outcome moved on alone", async () => {
+  for (const to of ["awaiting_ci", "review", "rework", "needs_input", "queued", "done", "rejected"]) {
+    const f = settleFakes("in_progress");
+    await settling(() => settleAfterSession(1, settleActor, async () => void f.move(to), f.deps));
+    assert.deepEqual(f.calls.statuses, [], to);
+    assert.deepEqual(f.calls.comments, [], to);
+  }
+});
+
+test("settleAfterSession parks a task the outcome failed to move, saying why", async () => {
+  const f = settleFakes("in_progress");
+  await settling(() =>
+    settleAfterSession(1, settleActor, async () => {
+      throw new Error("pinboard -> 502 Bad Gateway");
+    }, f.deps),
+  );
+  assert.deepEqual(f.calls.statuses, ["rework"]);
+  assert.match(f.calls.comments[0], /502 Bad Gateway/);
+});
+
+test("settleAfterSession parks a task an outcome forgot to move, on any pinboard", async () => {
+  // `executing`/`handoff` are what a pinboard from before the change reports.
+  for (const status of ["in_progress", "executing", "handoff"]) {
+    const f = settleFakes(status);
+    await settling(() => settleAfterSession(1, settleActor, async () => {}, f.deps));
+    assert.deepEqual(f.calls.statuses, ["rework"], status);
+    assert.match(f.calls.comments[0], new RegExp(`still '${status}'`));
+  }
+  assert.deepEqual([...STILL_RUNNING_STATUSES].sort(), ["executing", "handoff", "in_progress"]);
+});
+
+test("settleAfterSession keeps a move that landed even if a later step threw", async () => {
+  const f = settleFakes("in_progress");
+  await settling(() =>
+    settleAfterSession(1, settleActor, async () => {
+      f.move("awaiting_ci");
+      throw new Error("comment failed");
+    }, f.deps),
+  );
+  assert.deepEqual(f.calls.statuses, []);
+});
+
+test("settleAfterSession with an unreadable status parks only when the outcome failed", async () => {
+  const unreadable = () => {
+    throw new Error("pinboard down");
+  };
+  const ok = settleFakes(unreadable);
+  await settling(() => settleAfterSession(1, settleActor, async () => {}, ok.deps));
+  assert.deepEqual(ok.calls.statuses, []);
+  const failed = settleFakes(unreadable);
+  await settling(() =>
+    settleAfterSession(1, settleActor, async () => {
+      throw new Error("push failed");
+    }, failed.deps),
+  );
+  assert.deepEqual(failed.calls.statuses, ["rework"]);
+});
+
+test("every no-commit outcome moves the task out of in_progress", () => {
+  const handoffs = [
+    { completed: "", verified: "" },
+    { completed: "x", verified: "y" },
+    { completed: "x", verified: "y", outcome: "already_done" as const },
+    { completed: "x", verified: "", outcome: "rejected" as const },
+  ];
+  for (const labels of [[], ["root-access"], ["no-repo-change"]]) {
+    for (const h of handoffs) assert.ok(!STILL_RUNNING_STATUSES.includes(decideNoCommitOutcome(labels, h).to));
+  }
 });
 
 // a no-commit session on an ops task is a success, on a code task a failure.

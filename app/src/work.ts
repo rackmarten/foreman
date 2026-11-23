@@ -114,6 +114,11 @@ function usage(): void {
       "    Fits a phone-width terminal; --json prints pinboard's response.",
       "  work task list [--project=<slug|id>] [--status=<status>] [--type=<taskType>] [--executor=<mode>]",
       "                 [--parent=<id>] [--label=<name>]",
+      "    Statuses: idea, defined, queued, in_progress, needs_input, awaiting_ci,",
+      "    awaiting_merge, deploying, verifying, review, rework, done, rejected.",
+      "    review is a human approving before the change lands. Old names still",
+      "    work: planned/todo/backlog mean defined, executing in_progress,",
+      "    awaiting_review review.",
       "  work task show <id>",
       "    On a story, also lists its children in run order (depends_on, then priority)",
       "    with status, executor and blocked-by; on a child, names its story.",
@@ -144,6 +149,8 @@ function usage(): void {
       "                          [--duration-ms=] [--turns=] [--agent=<agentName>]",
       "                          [--summary=<markdown TL;DR, at most 5 lines>]",
       "                          [--checklist=<item to check by hand>]... (repeatable)",
+      "    Records the handoff; it does not change the task's status (move it with",
+      "    task update or task complete).",
       "  work task complete <id>",
       "    Records a linked PR that GitHub already has merged or closed (gh pr view)",
       "    before completing, so pinboard's open-PR refusal only hits a PR still open.",
@@ -212,7 +219,7 @@ function usage(): void {
       "  work pipeline watch [--interval-seconds=] [--probe-interval-seconds=]",
       "    #160: the post-PR pipeline poller, run as foreman-pipeline.service.",
       "    Drives a task through awaiting_ci -> awaiting_merge -> deploying ->",
-      "    verifying from pinboard's own statuses (GET /pipeline/next): polls CI,",
+      "    verifying -> done from pinboard's own statuses (GET /pipeline/next): polls CI,",
       "    squash-merges, runs deploy-service.sh under the repo's deploy lock and",
       "    re-runs its healthcheck. No agent, no Claude budget. A stage that fails",
       "    comments what happened and parks the task in rework for a human (#161",
@@ -708,7 +715,7 @@ async function taskHandoff(args: string[]): Promise<void> {
     process.exit(2);
   }
   const handoff = await submitHandoff(id, { ...currentActor(), ...input });
-  console.log(`Handoff #${handoff.id} recorded, task ${id} moved to handoff.`);
+  console.log(`Handoff #${handoff.id} recorded on task ${id}; its status is unchanged.`);
 }
 
 // parseFlags only recognizes `--flag=value`, not a space-separated
@@ -1008,7 +1015,7 @@ async function planSync(args: string[]): Promise<void> {
   const tasks = await listTasks({ projectId: project.id });
   const openTasks = tasks.filter((t) => t.status !== "done");
   const current =
-    openTasks.find((t) => t.status === "executing" || t.status === "handoff") ?? openTasks[0];
+    openTasks.find((t) => t.status === "in_progress" || t.status === "executing") ?? openTasks[0];
   const handoffs = await getProjectHandoffs(project.id, 1);
 
   writeFileSync(targetPath, renderPlanMarkdown(project, openTasks, current, handoffs[0]));
