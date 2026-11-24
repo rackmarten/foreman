@@ -8,6 +8,12 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Changed
+- A run that ends with a result and no PR (a no-commit session accepted for
+  review, an LLM gateway answer) moves to `review` through
+  `POST /tasks/:id/pipeline` instead of a status PATCH, since pinboard no
+  longer lets a PATCH set a system status. Against a pinboard that predates
+  that move it falls back to the PATCH. `work task update` help says which
+  statuses `--status` takes.
 - Runs on pinboard's new task statuses: a claimed task is `in_progress`
   (was `executing`), a green PR held for a human goes to `review` with a
   `reviewReason` (`migration`, `no_auto_deploy` or `production`) instead of

@@ -725,6 +725,28 @@ export function advancePipeline(
   });
 }
 
+// A run that ends with a result and no PR (research, an ops task, an LLM
+// gateway answer) waits in review for a human to accept it. review is a
+// status pinboard only sets through the pipeline (in_progress -> review);
+// a pinboard that predates that move refuses exactly that move with 409,
+// and gets the status PATCH it took before. Any other refusal (a person
+// pulled the task out mid-run) is left to the caller, not overwritten.
+export async function moveToReview(
+  taskId: number,
+  actor: Actor,
+  deps: { advance: (taskId: number, actor: Actor, to: string) => Promise<unknown>; setStatus: (taskId: number, status: string) => Promise<unknown> } = {
+    advance: advancePipeline,
+    setStatus: setTaskStatus,
+  },
+): Promise<void> {
+  try {
+    await deps.advance(taskId, actor, "review");
+  } catch (err) {
+    if (!(err instanceof Error && / -> 409 /.test(err.message) && /'in_progress' to 'review'/.test(err.message))) throw err;
+    await deps.setStatus(taskId, "review");
+  }
+}
+
 export interface HandoffInput extends Actor {
   agentName?: string;
   completed?: string;

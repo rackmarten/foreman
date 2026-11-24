@@ -19,6 +19,7 @@ import {
   addComment,
   addPullRequest,
   advancePipeline,
+  moveToReview,
   claimTaskWithLease,
   clearControl,
   getComments,
@@ -2016,7 +2017,7 @@ async function runEightBallTask(
       costUsd: "0",
     });
     await addComment(taskId, actor, result.content);
-    await setTaskStatus(taskId, "review");
+    await moveToReview(taskId, actor);
     console.log(`Task ${taskId}: LLM gateway run succeeded.`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2434,7 +2435,9 @@ export async function runTask(taskId: number, opts: RunOptions = DEFAULT_RUN_OPT
           outcome.handoff,
         );
         await addComment(taskId, actor, decision.comment);
-        await setTaskStatus(taskId, decision.to);
+        // review is reached through the pipeline, not a status PATCH
+        if (decision.to === "review") await moveToReview(taskId, actor);
+        else await setTaskStatus(taskId, decision.to);
         console.log(`Task ${taskId}: attempt ${attempt} completed with no changes, marked for ${decision.to}.`);
         return;
       }

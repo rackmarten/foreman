@@ -127,6 +127,8 @@ function usage(): void {
       "                    [--executor=] [--priority=] [--autonomy=] [--effort=] [--reasoning=] [--parent=<id>] [--label=<name>]... [--depends-on=<id>]... <title...>",
       "  work task update <id> [--title=] [--description=] [--status=] [--type=] [--executor=]",
       "                    [--priority=] [--autonomy=] [--effort=] [--reasoning=] [--parent=<id>|--parent=none]",
+      "    --status takes idea, defined, queued, rework, done or rejected; pinboard sets the",
+      "    rest itself (claim for in_progress, the pipeline for the others).",
       "    --parent replaces the task's existing parent (none removes it).",
       "    --effort is story points; --reasoning=medium|high|none is the run's reasoning effort",
       "    (none clears it, so the task inherits its project's default).",
