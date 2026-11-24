@@ -242,7 +242,7 @@ test("a child whose task is running or in rework is not restacked", async () => 
     f.pushTo("a", "a2.txt", "more\n");
     const before = f.remoteSha("b");
     const rows = [prRow(1, 10, "a"), prRow(2, 20, "b", { baseBranch: "a", stackedOnTaskId: 10, stackedOnSha: aTip })];
-    for (const status of ["executing", "rework"]) {
+    for (const status of ["in_progress", "rework"]) {
       const { deps } = fakeDeps(f, rows, { 20: status });
       assert.deepEqual((await restackOpenPrs(deps)).map((o) => o.result), ["skipped"]);
       assert.equal(f.remoteSha("b"), before);

@@ -741,22 +741,27 @@ export function pruneTrustedWorkdirs(configPath: string, root: string = TASK_ROO
 // undefined (or empty, nothing opened yet) keeps the workdir.
 //
 // the retention window alone never removes a task that may still
-// run in its checkout (queued, executing, needs_input, rework, or a pipeline
-// stage), so a task parked on an unanswered question keeps its session.
+// run in its checkout (queued, in_progress, needs_input, rework, or a
+// pipeline stage), so a task parked on an unanswered question keeps its
+// session. A migration hold in review keeps it too: its PR is still open.
+// `executing` and `awaiting_review` are the same states on a pinboard from
+// before the status model change (the two deploy separately); drop them once
+// every pinboard has it.
 export const PROTECTED_WORKDIR_STATUSES: readonly string[] = [
   "queued",
-  "executing",
+  "in_progress",
   "needs_input",
   "rework",
   "awaiting_ci",
   "awaiting_merge",
-  "awaiting_review",
   "deploying",
   "verifying",
+  "executing",
+  "awaiting_review",
 ];
 
 export function isSweepable(
-  task: { status: string; updatedAt: string },
+  task: { status: string; updatedAt: string; reviewReason?: string | null },
   now: number,
   retentionMs: number,
   prs?: { state: string }[],
@@ -764,5 +769,6 @@ export function isSweepable(
   if (task.status === "done" || task.status === "rejected") return true;
   if (task.status === "review" && prs && prs.length > 0 && prs.every((pr) => pr.state === "merged")) return true;
   if (PROTECTED_WORKDIR_STATUSES.includes(task.status)) return false;
+  if (task.status === "review" && task.reviewReason === "migration") return false;
   return now - new Date(task.updatedAt).getTime() > retentionMs;
 }

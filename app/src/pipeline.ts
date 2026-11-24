@@ -40,6 +40,7 @@ import {
   type PipelineTask,
   type PullRequest,
   type RepairReason,
+  type ReviewReason,
 } from "./pinboard.js";
 import { restackOpenPrs } from "./restack.js";
 import { rebaseOntoMain, repoWorkdir, resolveDefaultBranch, withDeployLock } from "./workdir.js";
@@ -271,8 +272,8 @@ export function stageElapsedMs(stageEnteredAt: string | null, now: number): numb
 // #61's item 2, and the one judgement call in the whole poller: a diff that
 // touches a drizzle migration holds for a human BEFORE merge, because a bad
 // migration against a live database is far costlier to unwind than a bad UI
-// change. Pinboard only knows the `awaiting_review` stage exists; which diffs
-// qualify is decided here.
+// change. Pinboard only knows a task can wait in `review` with the reason
+// `migration`; which diffs qualify is decided here.
 export function touchesMigration(paths: readonly string[]): boolean {
   return paths.some((path) => /(^|\/)drizzle\/.*\.sql$/.test(path.trim()));
 }
@@ -290,34 +291,44 @@ export interface AfterCiInput {
 // Where a task goes once every PR's CI is green. Pure so the whole policy -
 // auto-deploy opt-in, the production guard, the migration hold - reads in one
 // place and is testable without a GitHub.
-export function decideAfterCi(input: AfterCiInput): { to: "awaiting_merge" | "awaiting_review" | "review"; note: string } {
+//
+// Every held case lands in `review` (a human approves before it lands), with
+// the reason pinboard stores and shows on the review card. A pinboard that
+// predates review reasons ignores the field and still holds the task there.
+export function decideAfterCi(input: AfterCiInput): { to: "awaiting_merge" | "review"; reviewReason?: ReviewReason; note: string } {
   if (!input.autoDeployAllowed || !input.localPath) {
-    return { to: "review", note: "CI is green. Auto-deploy is not enabled for this project, so the PR is left open for a human to merge." };
+    return {
+      to: "review",
+      reviewReason: "no_auto_deploy",
+      note: "CI is green. Auto-deploy is not enabled for this project, so the PR is left open for a human to approve and merge.",
+    };
   }
   // Defense in depth for the fixed decision that production stays off limits
   // to autonomous work, even though no pinboard project should ever be
   // configured that way.
   if (input.repoSlugs.includes("production")) {
-    return { to: "review", note: "CI is green, but production is never eligible for an autonomous merge - the PR is left open for a human." };
+    return {
+      to: "review",
+      reviewReason: "production",
+      note: "CI is green, but production is never eligible for an autonomous merge - the PR is left open for a human.",
+    };
   }
   if (input.holdRepos.length > 0) {
     return {
-      to: "awaiting_review",
+      to: "review",
+      reviewReason: "migration",
       note: `CI is green, but the diff touches a database migration (${input.holdRepos.join(", ")}), so it holds for a human before merge. Approve it in pinboard's review queue to let the merge proceed.`,
     };
   }
   return { to: "awaiting_merge", note: "CI is green - merging." };
 }
 
-// where a task goes once its deploy is healthy. An `agent` task
-// has nobody waiting to look at it, so it closes itself; `human+agent` (and
-// anything unrecognised) still goes to review for a human.
-export function decideAfterVerify(executorMode: string | undefined, checked: readonly string[]): { to: "done" | "review"; note: string } {
+// where a task goes once its deploy is healthy: done, for every executor
+// mode. Review happens before a change lands, never after; testing by hand
+// after a deploy is its own human task in the story, not a status.
+export function decideAfterVerify(executorMode: string | undefined, checked: readonly string[]): { to: "done"; note: string } {
   const what = checked.length > 0 ? `Deployed and healthy: ${checked.join(", ")}.` : "Deployed.";
-  if (executorMode === "agent") {
-    return { to: "done", note: `${what} Closed automatically (executor agent).` };
-  }
-  return { to: "review", note: `${what} Ready for review.` };
+  return { to: "done", note: `${what} Closed automatically${executorMode ? ` (executor ${executorMode})` : ""}.` };
 }
 
 // a merge that failed is nearly always this task's branch having
@@ -1065,6 +1076,8 @@ export interface StageOutcome {
   // not say why, and the resumed run reads both fields to know what it is
   // fixing (see runner.ts's repairPromptLines).
   repair?: { reason: RepairReason; context: string };
+  // Set only when `moved` is `review`: why it waits for a human.
+  reviewReason?: ReviewReason;
 }
 
 // A failure no further agent run can help with: a human has to look. The
@@ -1170,7 +1183,7 @@ async function handleAwaitingCi(entry: PipelineTask, repos: PipelineRepo[], now:
     repoSlugs: repos.map((r) => r.repoSlug),
     holdRepos,
   });
-  return { moved: decision.to, note: "CI green", comment: decision.note };
+  return { moved: decision.to, note: "CI green", comment: decision.note, reviewReason: decision.reviewReason };
 }
 
 // A PR that conflicts with its base gets no pull_request run at all, so the
@@ -1327,7 +1340,7 @@ export function decideAfterMerge(
   }
   if (deployable.length === 0) {
     return {
-      moved: "review",
+      moved: "done",
       note: "merged, nothing to deploy",
       comment: `${mergedNote} ${repoSlugs.join(", ")} declares no deploy steps, so nothing was deployed - see that repo's AGENTS.md "Close-out" for what shipping means for it.`,
     };
@@ -1562,10 +1575,43 @@ export interface PipelineOutcome {
   note: string;
 }
 
+// A pinboard that predates the status model change refuses awaiting_merge ->
+// done: it expected `review` there, its old post-merge sign-off. Pinboard and
+// foreman deploy separately, so a refusal of exactly that move is retried
+// once with the old target. Drop this once every pinboard has the change.
+export function legacyPipelineTarget(stage: string, moved: string): string | null {
+  return stage === "awaiting_merge" && moved === "done" ? "review" : null;
+}
+
+export function isTransitionRefusal(err: unknown): boolean {
+  return /-> 409 [\s\S]*cannot move a task/.test(err instanceof Error ? err.message : String(err));
+}
+
+export async function advanceWithLegacyFallback(
+  entry: Pick<PipelineTask, "taskId" | "stage">,
+  outcome: StageOutcome,
+  advance: typeof advancePipeline = advancePipeline,
+  retry: <T>(fn: () => Promise<T>) => Promise<T> = withRetry,
+): Promise<string> {
+  const moved = outcome.moved as string;
+  const send = (to: string) => retry(() => advance(entry.taskId, PIPELINE_ACTOR, to, outcome.repair, outcome.reviewReason));
+  try {
+    await send(moved);
+    return moved;
+  } catch (err) {
+    const legacy = legacyPipelineTarget(entry.stage, moved);
+    if (!legacy || !isTransitionRefusal(err)) throw err;
+    await send(legacy);
+    return legacy;
+  }
+}
+
 async function advanceOne(entry: PipelineTask, now: number): Promise<PipelineOutcome> {
-  // `awaiting_review` is a human hold - nothing here releases it, the review
-  // queue's Approve does (pinboard moves it straight to `awaiting_merge`).
-  if (entry.stage === "awaiting_review") return { taskId: entry.taskId, stage: entry.stage, moved: null, note: "held for review" };
+  // A pinboard that predates the status model change still reports its
+  // `awaiting_review` hold here. It is a human hold - nothing here releases
+  // it, the review queue's Approve does. Drop this once every pinboard has
+  // the change (the hold is plain `review` there and never listed).
+  if ((entry.stage as string) === "awaiting_review") return { taskId: entry.taskId, stage: entry.stage, moved: null, note: "held for review" };
 
   const prs = await listPullRequests(entry.taskId);
   const repos = pipelineRepos(prs, entry.prBranch);
@@ -1587,10 +1633,8 @@ async function advanceOne(entry: PipelineTask, now: number): Promise<PipelineOut
   if (outcome.comment) {
     await withRetry(() => addComment(entry.taskId, PIPELINE_ACTOR, outcome.comment as string));
   }
-  if (outcome.moved) {
-    await withRetry(() => advancePipeline(entry.taskId, PIPELINE_ACTOR, outcome.moved as string, outcome.repair));
-  }
-  return { taskId: entry.taskId, stage: entry.stage, moved: outcome.moved, note: outcome.note };
+  const moved = outcome.moved ? await advanceWithLegacyFallback(entry, outcome) : null;
+  return { taskId: entry.taskId, stage: entry.stage, moved, note: outcome.note };
 }
 
 export interface PipelineResult {

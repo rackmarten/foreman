@@ -60,6 +60,9 @@ export interface Task {
   // by any human requeue - see runner.ts's repairPromptLines.
   repairReason: RepairReason | null;
   repairContext: string | null;
+  // why a task in `review` waits for a human before its PR merges. Optional:
+  // a pinboard that predates it sends none.
+  reviewReason?: ReviewReason | null;
   // The parent task whose unmerged PR this task builds on (see "Stacked
   // branches" in the README). Optional so an older pinboard parses.
   stackOn?: StackOn | null;
@@ -675,7 +678,12 @@ export function updatePullRequestStack(
 // pipeline.ts); foreman's poller (pipeline.ts here) owns the doing. The
 // payload is everything a stateless poller needs in one round trip, so it
 // never has to keep its own idea of what a task is in the middle of.
-export type PipelineStage = "awaiting_ci" | "awaiting_merge" | "awaiting_review" | "deploying" | "verifying";
+export type PipelineStage = "awaiting_ci" | "awaiting_merge" | "deploying" | "verifying";
+
+// why a task waits in `review` for a human before its PR merges (pinboard's
+// REVIEW_REASONS). Sent with a move to `review`; a pinboard that predates it
+// ignores the field.
+export type ReviewReason = "migration" | "no_auto_deploy" | "production";
 
 export interface PipelineTask {
   taskId: number;
@@ -707,11 +715,13 @@ export function advancePipeline(
   actor: Actor,
   to: string,
   repair?: { reason: RepairReason; context?: string },
+  reviewReason?: ReviewReason,
 ): Promise<Task> {
   return post(`/tasks/${taskId}/pipeline`, {
     ...actor,
     to,
     ...(repair ? { repairReason: repair.reason, repairContext: repair.context } : {}),
+    ...(reviewReason && to === "review" ? { reviewReason } : {}),
   });
 }
 

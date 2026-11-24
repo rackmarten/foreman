@@ -42,7 +42,7 @@ const RESTACK_ACTOR: Actor = { actorType: "agent", actorName: "foreman-pipeline"
 // branch (and rebases onto its base before it pushes anyway), and a task
 // already in rework or waiting on a question is left to whoever has it, so
 // a conflict there is not reported again on every pass.
-export const RESTACK_STATUSES = ["review", "awaiting_review", "awaiting_ci", "awaiting_merge"];
+export const RESTACK_STATUSES = ["review", "awaiting_ci", "awaiting_merge"];
 
 export type RestackResult =
   | { status: "restacked"; ontoSha: string; sha: string }

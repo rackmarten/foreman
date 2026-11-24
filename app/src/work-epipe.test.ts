@@ -19,7 +19,7 @@ function stubPinboard(): Promise<Server> {
     title: "Example story",
     description: "line\n".repeat(50),
     taskType: "story",
-    status: "executing",
+    status: "in_progress",
     executorMode: "agent",
     priority: 1,
     labels: [],

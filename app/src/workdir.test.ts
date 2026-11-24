@@ -502,6 +502,12 @@ test("isSweepable keeps a live task's workdir until it is finished or aged out",
   assert.equal(isSweepable({ status: "done", updatedAt: fresh }, now, retention), true);
   assert.equal(isSweepable({ status: "rejected", updatedAt: fresh }, now, retention), true);
   assert.equal(isSweepable({ status: "review", updatedAt: old }, now, retention), true);
+  // a migration hold's PR is still open: its checkout outlives the window
+  assert.equal(isSweepable({ status: "review", reviewReason: "migration", updatedAt: old }, now, retention), false);
+  // a running task, on either side of the status model change
+  for (const status of ["in_progress", "executing", "awaiting_review"]) {
+    assert.equal(isSweepable({ status, updatedAt: old }, now, retention), false, status);
+  }
 });
 
 test("isSweepable removes a review task's workdir once every PR is merged, and nothing else early", () => {
@@ -548,7 +554,7 @@ test("isSweepable never ages out a task that may still run in its checkout", () 
   const now = Date.parse("2026-09-17T12:00:00Z");
   const retention = 3 * 24 * 60 * 60 * 1000;
   const old = "2026-09-10T11:00:00Z";
-  for (const status of ["queued", "executing", "needs_input", "rework", "awaiting_ci", "deploying"]) {
+  for (const status of ["queued", "in_progress", "needs_input", "rework", "awaiting_ci", "deploying"]) {
     assert.equal(isSweepable({ status, updatedAt: old }, now, retention), false, status);
   }
   assert.equal(isSweepable({ status: "handoff", updatedAt: old }, now, retention), true);

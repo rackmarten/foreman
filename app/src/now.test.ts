@@ -9,7 +9,7 @@ function story(overrides: Partial<NowStory> = {}): NowStory {
   return {
     id: 10,
     title: "Story title",
-    status: "executing",
+    status: "in_progress",
     project: { id: 1, slug: "alpha", name: "Alpha" },
     progress: { done: 3, total: 7 },
     running: [],
@@ -33,7 +33,7 @@ test("formatNow: one story with every kind of line", () => {
       stories: [
         story({
           interactiveCostUsd: 4.2,
-          running: [{ id: 12, title: "Running child", status: "executing" }],
+          running: [{ id: 12, title: "Running child", status: "in_progress" }],
           waiting: [
             { kind: "review", taskId: 11, title: "Needs a look" },
             { kind: "ask", taskId: 13, title: "Ask task", askId: 5, question: "Which port?" },
@@ -101,7 +101,7 @@ test("formatNow: every line fits the phone width, long titles and paths are cut"
         story({
           title: long,
           interactiveCostUsd: 123.456,
-          running: [{ id: 99999, title: long, status: "executing" }],
+          running: [{ id: 99999, title: long, status: "in_progress" }],
           waiting: [{ kind: "review", taskId: 99998, title: long }],
           next: { id: 99997, title: long },
           sessions: [

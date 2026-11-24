@@ -8,6 +8,17 @@ publishes the container image `ghcr.io/rackmarten/foreman` at that version.
 ## [Unreleased]
 
 ### Changed
+- Runs on pinboard's new task statuses: a claimed task is `in_progress`
+  (was `executing`), a green PR held for a human goes to `review` with a
+  `reviewReason` (`migration`, `no_auto_deploy` or `production`) instead of
+  `awaiting_review`, and a healthy deploy or a merge with nothing to deploy
+  closes the task as `done` for every executor mode instead of going to
+  `review`. Once a session has ended, a task that is still `in_progress`
+  (a step threw, or nothing moved it) is parked in `rework` with a comment,
+  since a handoff no longer changes the status. Works against a pinboard from
+  before the change too: the old status names are still read, and a refused
+  no-deploy `done` falls back to `review`. `work task handoff` says the
+  status is unchanged, and `work task list` help lists the statuses.
 - Task runs and chat default to `high` reasoning effort instead of `medium`
   when neither the task, its project nor `CLAUDE_EFFORT` sets one.
 - `scripts/sync-claude-rules.sh` writes the containers' `CLAUDE.md` as a stub

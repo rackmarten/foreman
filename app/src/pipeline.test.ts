@@ -39,6 +39,9 @@ import {
   fetchLatestCiRun,
   orgForPr,
   decideAfterMerge,
+  advanceWithLegacyFallback,
+  isTransitionRefusal,
+  legacyPipelineTarget,
   fetchRedMain,
   previousFailedRunId,
   isDockerHubRateLimited,
@@ -216,19 +219,21 @@ test("touchesMigration ignores drizzle's own metadata and ordinary sql", () => {
   assert.equal(touchesMigration([]), false);
 });
 
-// a healthy deploy closes an agent task; anything else goes to review.
+// a healthy deploy closes the task, whoever it belongs to: review happens
+// before a change lands, never after.
 test("decideAfterVerify closes an agent task after a healthy deploy", () => {
   const decision = decideAfterVerify("agent", ["glance", "keep"]);
   assert.equal(decision.to, "done");
   assert.equal(decision.note, "Deployed and healthy: glance, keep. Closed automatically (executor agent).");
 });
 
-test("decideAfterVerify sends human+agent and human tasks to review", () => {
+test("decideAfterVerify closes human+agent and human tasks too, never review", () => {
   for (const mode of ["human+agent", "human", undefined]) {
     const decision = decideAfterVerify(mode, ["glance"]);
-    assert.equal(decision.to, "review");
-    assert.equal(decision.note, "Deployed and healthy: glance. Ready for review.");
+    assert.equal(decision.to, "done", String(mode));
+    assert.match(decision.note, /^Deployed and healthy: glance\. Closed automatically/);
   }
+  assert.equal(decideAfterVerify(undefined, []).note, "Deployed. Closed automatically.");
 });
 
 // The whole post-CI policy in one place: the auto-deploy opt-in, the
@@ -236,24 +241,40 @@ test("decideAfterVerify sends human+agent and human tasks to review", () => {
 test("decideAfterCi leaves a project without auto-deploy for a human to merge", () => {
   const decision = decideAfterCi({ autoDeployAllowed: false, localPath: "my-org/keep", repoSlugs: ["keep"], holdRepos: [] });
   assert.equal(decision.to, "review");
+  assert.equal(decision.reviewReason, "no_auto_deploy");
   assert.match(decision.note, /Auto-deploy is not enabled/);
+  // no localPath reads the same as no opt-in
+  assert.equal(decideAfterCi({ autoDeployAllowed: true, localPath: null, repoSlugs: ["keep"], holdRepos: [] }).reviewReason, "no_auto_deploy");
 });
 
 test("decideAfterCi refuses to merge production even with auto-deploy on", () => {
   const decision = decideAfterCi({ autoDeployAllowed: true, localPath: "my-org/production", repoSlugs: ["production"], holdRepos: [] });
   assert.equal(decision.to, "review");
+  assert.equal(decision.reviewReason, "production");
   assert.match(decision.note, /production is never eligible/);
 });
 
 test("decideAfterCi holds a migration diff for a human before merge", () => {
   const decision = decideAfterCi({ autoDeployAllowed: true, localPath: "my-org/pinboard", repoSlugs: ["pinboard"], holdRepos: ["pinboard"] });
-  assert.equal(decision.to, "awaiting_review");
+  assert.equal(decision.to, "review");
+  assert.equal(decision.reviewReason, "migration");
   assert.match(decision.note, /migration/);
 });
 
 test("decideAfterCi merges an ordinary green diff on an auto-deploy project", () => {
   const decision = decideAfterCi({ autoDeployAllowed: true, localPath: "my-org/glance", repoSlugs: ["glance"], holdRepos: [] });
   assert.equal(decision.to, "awaiting_merge");
+  assert.equal(decision.reviewReason, undefined);
+});
+
+test("decideAfterCi never asks for a status that no longer exists", () => {
+  const inputs = [
+    { autoDeployAllowed: false, localPath: "o/a", repoSlugs: ["a"], holdRepos: [] },
+    { autoDeployAllowed: true, localPath: "o/production", repoSlugs: ["production"], holdRepos: [] },
+    { autoDeployAllowed: true, localPath: "o/a", repoSlugs: ["a"], holdRepos: ["a"] },
+    { autoDeployAllowed: true, localPath: "o/a", repoSlugs: ["a"], holdRepos: [] },
+  ];
+  for (const input of inputs) assert.ok(["review", "awaiting_merge"].includes(decideAfterCi(input).to));
 });
 
 // One task can land changes across several repos, each with its own PR on the
@@ -760,8 +781,53 @@ test("orgForPr reads the org from the PR's own URL, not the task's project", () 
 test("decideAfterMerge deploys regardless of how the task reached awaiting_merge", () => {
   const out = decideAfterMerge(["https://github.com/my-org/cue/pull/5"], ["cue"], { deployable: [{ repoSlug: "cue" }], undeclared: [] });
   assert.equal(out.moved, "deploying");
-  assert.equal(decideAfterMerge([], ["cue"], { deployable: [], undeclared: [] }).moved, "review");
+  // merged with nothing to deploy is done: there is no post-merge sign-off.
+  assert.equal(decideAfterMerge([], ["cue"], { deployable: [], undeclared: [] }).moved, "done");
   assert.equal(decideAfterMerge([], ["cue"], { deployable: [], undeclared: ["cue: no declaration"] }).moved, "rework");
+});
+
+// pinboard and foreman deploy separately: a pinboard from before the status
+// model change refuses awaiting_merge -> done, so that one move falls back to
+// the review it expected.
+test("advanceWithLegacyFallback retries a refused no-deploy close as review, and nothing else", async () => {
+  const refusal = new Error(
+    "http://pinboard/tasks/7/pipeline -> 409 Conflict: {\"error\":\"cannot move a task from 'awaiting_merge' to 'done' (allowed: deploying, review, queued, rework, rejected)\"}",
+  );
+  assert.equal(isTransitionRefusal(refusal), true);
+  assert.equal(isTransitionRefusal(new Error("-> 500 Internal Server Error")), false);
+  assert.equal(legacyPipelineTarget("awaiting_merge", "done"), "review");
+  assert.equal(legacyPipelineTarget("verifying", "done"), null);
+
+  const noRetry = <T>(fn: () => Promise<T>) => fn();
+  const sent: { to: string; reviewReason?: string }[] = [];
+  const oldPinboard = async (_id: number, _actor: unknown, to: string, _repair?: unknown, reviewReason?: string) => {
+    sent.push({ to, reviewReason });
+    if (to === "done") throw refusal;
+    return {} as never;
+  };
+  const landed = await advanceWithLegacyFallback({ taskId: 7, stage: "awaiting_merge" }, { moved: "done", note: "" }, oldPinboard, noRetry);
+  assert.equal(landed, "review");
+  assert.deepEqual(sent.map((s) => s.to), ["done", "review"]);
+
+  // a new pinboard takes done at once
+  sent.length = 0;
+  const newPinboard = async (_id: number, _actor: unknown, to: string) => {
+    sent.push({ to });
+    return {} as never;
+  };
+  assert.equal(await advanceWithLegacyFallback({ taskId: 7, stage: "awaiting_merge" }, { moved: "done", note: "" }, newPinboard, noRetry), "done");
+  assert.deepEqual(sent.map((s) => s.to), ["done"]);
+
+  // the review reason rides along on a move to review
+  sent.length = 0;
+  await advanceWithLegacyFallback({ taskId: 7, stage: "awaiting_ci" }, { moved: "review", note: "", reviewReason: "migration" }, oldPinboard, noRetry);
+  assert.deepEqual(sent, [{ to: "review", reviewReason: "migration" }]);
+
+  // any other refusal is not papered over
+  await assert.rejects(
+    advanceWithLegacyFallback({ taskId: 7, stage: "verifying" }, { moved: "done", note: "" }, oldPinboard, noRetry),
+    /409/,
+  );
 });
 
 test("fetchCiFailure never returns an empty log: run URL plus job conclusions", () => {
