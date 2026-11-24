@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseChatStreamEvent, subscribeChatStream, type ChatStreamEvent } from "./pinboard.js";
+import { moveToReview, parseChatStreamEvent, subscribeChatStream, type ChatStreamEvent } from "./pinboard.js";
 
 test("parses a human_message event", () => {
   assert.deepEqual(parseChatStreamEvent({ event: "human_message", data: '{"threadId":4,"message":"hi"}' }), {
@@ -167,4 +167,32 @@ test("an agent's own message is never fed back into the session as operator inpu
     parseChatStreamEvent({ event: "human_message", data: JSON.stringify({ threadId: 7, role: "agent", body: "my own reply" }) }),
     null,
   );
+});
+
+test("moveToReview goes through the pipeline, and PATCHes only when an older pinboard refuses the move", async () => {
+  const actor = { actorType: "agent" as const, actorName: "foreman-runner" };
+  const calls: string[] = [];
+  const setStatus = async (_id: number, status: string) => calls.push(`patch ${status}`);
+  await moveToReview(1, actor, { advance: async (_id, _a, to) => calls.push(`pipeline ${to}`), setStatus });
+  assert.deepEqual(calls, ["pipeline review"]);
+
+  calls.length = 0;
+  const refused = async () => {
+    throw new Error("http://pinboard/api/tasks/1/pipeline -> 409 Conflict: cannot move a task from 'in_progress' to 'review'");
+  };
+  await moveToReview(1, actor, { advance: refused, setStatus });
+  assert.deepEqual(calls, ["patch review"]);
+
+  const down = async () => {
+    throw new Error("http://pinboard/api/tasks/1/pipeline -> 502 Bad Gateway");
+  };
+  await assert.rejects(moveToReview(1, actor, { advance: down, setStatus }), /502/);
+
+  // pulled out by hand during the run: not an older pinboard, nothing to overwrite
+  const pulledOut = async () => {
+    throw new Error("http://pinboard/api/tasks/1/pipeline -> 409 Conflict: cannot move a task from 'rework' to 'review'");
+  };
+  calls.length = 0;
+  await assert.rejects(moveToReview(1, actor, { advance: pulledOut, setStatus }), /'rework' to 'review'/);
+  assert.deepEqual(calls, []);
 });

@@ -243,8 +243,10 @@ Around that, the LXC is still the operator's bare-metal base of operations:
   and any open blocked-by; on a child it names the story. Grooming (task
   #407): `work task update <id> [--title= --description= --status= --type=
   --executor= --priority= --autonomy= --effort= --reasoning= --parent=<id>|none]`
-  PATCHes only the given fields, and `--parent` replaces the existing
-  parent relation; `work task label <id> add|remove <name>` resolves the
+  PATCHes only the given fields (`--status` takes only the statuses set by
+  hand: `idea`, `defined`, `queued`, `rework`, `done`, `rejected`; pinboard
+  refuses the rest with a 400 naming the claim or pipeline call that sets
+  it), and `--parent` replaces the existing parent relation; `work task label <id> add|remove <name>` resolves the
   label by name and creates it on add; `work task create` takes repeatable
   `--label=<name>` and `--depends-on=<id>`. Zero-autonomy write path (I3):
   `work task claim <id>`, `work task comment <id> <text...>`,
